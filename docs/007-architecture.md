@@ -414,6 +414,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/local-trigger.spec.ts` | Local investigation Trigger mapping: deterministic identity, follow-up Thread correlation, and schema validation |
 | `tests/local-source.spec.ts` | Disabled local intake and explicit allowlisted admission gate |
 | `tests/local-ingress.spec.ts` | Authenticated intake checks, private evidence storage, input validation, and socket permissions |
+| `tests/local-lifecycle.spec.ts` | Real Engine and SQLite lifecycle for local prompts, follow-ups, digest reads and restart recovery, with a simulated executor |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |

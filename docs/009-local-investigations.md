@@ -34,6 +34,14 @@ node scripts/sa.mjs followup --state-dir /absolute/path/to/state --id <investiga
 
 The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. The executor is still DSH and may have permissions unrelated to the CLI's scope; this phase is not a verified end-to-end read-only execution environment. A future revision must bind a verified read-only executor and enable safe evidence reads before production usage.
 
+## Phase 4: lifecycle verification and evidence integrity
+
+`tests/local-lifecycle.spec.ts` tests actual local intake against the real Engine, Policy, SourceRegistry and SQLite Store, using a **simulated assessor and executor**. It checks explicit authorization, ticket creation, follow-up input delivery, duplicate rejection, and the persisted ticket and evidence after reopening SQLite.
+
+`readLocalEvidence(stateDir, sha256)` provides a hash-verified, bounded, no-follow, in-process evidence read primitive. **It is not exposed to agents or the local socket**. Never pass arbitrary evidence paths to an agent, and do not treat this test as proof that the live DSH executor is read-only.
+
+Run `pnpm check` locally before merging. The next step after this baseline is an authorized evidence-reader tool and a sandboxed read-only investigation executor, then full DSH runtime smoke tests.
+
 ## Remaining implementation steps
 
 1. Implement a `SourceKind` for `local` and register it through the existing SourceRegistry. Scope and Policy must only admit explicitly authenticated local requests; never trust actor IDs submitted over HTTP.
