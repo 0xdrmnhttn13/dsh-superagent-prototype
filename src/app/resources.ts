@@ -6,6 +6,7 @@ import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
+import { readLocalEvidence } from '../sources/local-ingress.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -52,6 +53,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
+  { name: 'local/<trigger-id>/evidence/<sha256>', holds: 'an explicitly enabled local evidence blob reachable from this worker ticket, verified by checksum', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
@@ -66,6 +68,8 @@ export interface ResourceHost {
   promptVersion(sessionId: string): PromptVersion
   /** Whether a Session may read `revision` (the revision it currently runs under or any revision it ran under previously). */
   mayRead(sessionId: string, revision: number): boolean
+  /** Absolute state directory: only the trusted local evidence reader may use it. */
+  stateDir?: string
   feishuPageSize(): number
   sourceLink(trigger: Trigger, signal?: AbortSignal): Promise<{ source_url?: string; source_url_read?: string }>
 }
@@ -207,6 +211,30 @@ const ROUTES: readonly Route[] = [
     return sourcePage(read, 'feishu', () => feishuRead(commands, ref, read.resource, read.host.feishuPageSize()))
   }],
   ['github/', read => sourcePage(read, 'github', () => readGithub(read.host.commands.withSignal(read.signal), read.resource))],
+  ['local/', read => {
+    const { host, rest, ticketId } = read
+    const match = /^([^/]+)\/evidence\/([a-f0-9]{64})$/.exec(rest)
+    if (!match) throw new Error('Unknown local evidence resource')
+    if (!ticketId) throw new Error('Local evidence requires a worker ticket')
+    if (!host.stateDir) throw new Error('Local evidence store is unavailable')
+    const config = host.store.settings().sources.local
+    if (!config?.enabled || config.config.allowEvidenceRead !== true || config.config.acceptPrompts !== true) {
+      throw new Error('Local evidence reads are disabled')
+    }
+    const ticket = host.store.tickets.get(ticketId)
+    const evidenceTrigger = trigger(host, match[1]!, ticketId)
+    if (!ticket || evidenceTrigger.source !== 'local' || !readable(host, ticket, evidenceTrigger)) {
+      throw new Error('Local evidence is not reachable from this ticket')
+    }
+    const refs = Array.isArray(evidenceTrigger.meta.evidence) ? evidenceTrigger.meta.evidence : []
+    if (!refs.some(ref => typeof ref === 'object' && ref !== null && 'sha256' in ref && ref.sha256 === match[2])) {
+      throw new Error('Evidence digest not attached to this trigger')
+    }
+    const bytes = readLocalEvidence(host.stateDir, match[2]!)
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    if (decoded.includes('\\0')) throw new Error('Binary evidence is not readable as text')
+    return text(read, decoded)
+  }],
   ['trigger/', async read => {
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')
