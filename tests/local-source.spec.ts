@@ -43,6 +43,6 @@ describe('local Source registration and gate', () => {
   })
   it('cannot grant work on actor identity alone without authentication by the future ingress', () => {
     expect(localKind.channel).toBeUndefined()
-    expect(localKind.scope!({ meta: { investigationId: '../bad' } }, { acceptPrompts: false }).listened).toBe(false)
+    expect(localKind.scope!({ meta: { investigationId: '../bad' } }, { acceptPrompts: false, allowEvidenceRead: false }).listened).toBe(false)
   })
 })
