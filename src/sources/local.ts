@@ -5,6 +5,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import type { SourceKind } from './kind.ts'
 import { LOCAL_SOURCE } from './local-trigger.ts'
+import { listenLocalIngress, localActor } from './local-ingress.ts'
+import { sourceContext } from './host.ts'
 
 export const LocalConfigSchema = z.object({
   acceptPrompts: z.boolean().default(false),
@@ -46,4 +48,14 @@ export const name = 'dsh-superagent-local'
 export const inject = ['orchestrator']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(localKind), 'local: source kind')
+  ctx.effect(() => {
+    const host = ctx.orchestrator
+    const source = sourceContext(host, localKind)
+    return listenLocalIngress({
+      stateDir: source.deployment.stateDir,
+      source,
+      allowedActor: actor => actor === localActor() &&
+        host.sources.policyPart(LOCAL_SOURCE)?.allowed.some(entry => entry.id === actor) === true,
+    })
+  }, 'local: owner-only socket')
 }
