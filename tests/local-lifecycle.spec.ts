@@ -51,16 +51,23 @@ describe('local investigation lifecycle (real Engine and SQLite; simulated asses
     const dir = mkdtempSync(join(tmpdir(), 'local-e2e-'))
     dirs.push(dir)
     const r = rig(dir)
-    const raw = 'synthetic INVALID_CONFIG'
+    const raw = 'synthetic INVALID_CONFIG\\nEVIDENCE_ONLY_MARKER_76f31d'
+    const prompt = 'Investigate synthetic INVALID_CONFIG without modifying code'
     const evidence = [{ label: 'synthetic.log', base64: Buffer.from(raw).toString('base64') }]
     const first = await processLocalRequest(r.host, {
       kind: 'submit', eventId: 'event-1', investigationId: 'investigation-1',
-      text: 'Investigate synthetic INVALID_CONFIG without modifying code', evidence,
+      text: prompt, evidence,
     })
     expect(first).toMatchObject({ ok: true, status: 'stored', investigationId: 'investigation-1' })
     const digest = createHash('sha256').update(raw).digest('hex')
     expect(readLocalEvidence(dir, digest).toString('utf8')).toBe(raw)
-    expect(JSON.stringify(r.store.triggers.get(String(first.triggerId)))).not.toContain(raw)
+    const storedTrigger = r.store.triggers.get(String(first.triggerId))!
+    // The prompt may legitimately mention the same error code as the evidence file.
+    // Only evidence references, never the file body or base64 payload, belong in the Trigger.
+    expect(storedTrigger.text).toBe(prompt)
+    expect(storedTrigger.meta.evidence).toEqual([{ id: digest, sha256: digest, label: 'synthetic.log' }])
+    expect(JSON.stringify(storedTrigger)).not.toContain('EVIDENCE_ONLY_MARKER_76f31d')
+    expect(JSON.stringify(storedTrigger)).not.toContain(evidence[0]!.base64)
     r.engine.evaluateDue()
     expect(r.assessments).toHaveLength(1)
     expect(r.assessments[0]!.strength).toBe('explicit')
