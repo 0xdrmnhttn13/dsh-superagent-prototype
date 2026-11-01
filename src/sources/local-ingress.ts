@@ -2,7 +2,7 @@
  * No TCP listener or arbitrary actor impersonation is supported.
  */
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createServer, connect, type Server } from 'node:net'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -77,6 +77,33 @@ function evidenceOf(stateDir: string, uploads: z.infer<typeof EvidenceUpload>[])
     }
     return { id: sha256, sha256, label: upload.label }
   })
+}
+
+/** Read one local evidence blob by immutable digest.
+ * This is an in-process primitive for a future authorized evidence reader, not a socket endpoint or worker tool.
+ * Caller authorization and redaction are intentionally outside this function.
+ */
+export function readLocalEvidence(stateDir: string, sha256: string): Buffer {
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid evidence digest')
+  const directory = join(stateDir, 'local-evidence')
+  privateDirectory(directory)
+  const path = join(directory, sha256)
+  // O_NOFOLLOW prevents the final path from being replaced with a symbolic link.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.size > MAX_EVIDENCE || stat.size === 0
+      || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+      throw new Error('Unsafe evidence file')
+    }
+    const data = readFileSync(fd)
+    if (createHash('sha256').update(data).digest('hex') !== sha256) {
+      throw new Error('Evidence digest mismatch')
+    }
+    return data
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /** Verify enablement and allowlist before storing private evidence or routing a Trigger into the Engine. */
