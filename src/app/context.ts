@@ -1,7 +1,8 @@
 /** Built-in prompt sections, role policies, and transcript projections for orchestrator and worker Sessions. */
 import { bundledSkills, promptFile } from './skill-files.ts'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-export { textPage } from './cards.ts'
+// Legacy transcript format used only to migrate pre-v11 prompt records.
+type SessionEvent = { type: string; data: any }
+
 
 /** Built-in host-delivery and tool-usage rules shared by all Sessions; a team may override them (`builtInParts`). */
 export const sharedPrompt = promptFile('shared')

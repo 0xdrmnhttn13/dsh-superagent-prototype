@@ -5,7 +5,7 @@
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
-import type { Retry } from './sources/github.ts'
+interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }

@@ -8,7 +8,8 @@ import { ADMISSION_DEFAULTS, type Admission, type AdmissionCell, type AdmissionR
 import { key, type AssessmentOutcome, type Mandate, type Policy, type PolicyEffect, type SourceScope, type Strength, type Thread, type Ticket,
   type Trigger, type ActorRef, type GateResult } from './core/index.ts'
 import { sameName } from './infra/text.ts'
-import { WORKER_COMMANDS } from './infra/environment.ts'
+// Kept for compatibility with stored executor settings; standalone investigators never run commands.
+const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli']
 
 export const RuleIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,80}$/)
 export const RuleMatchSchema = z.object({ rule_id: RuleIdSchema, reason: z.string().trim().min(1).max(500) }).strict()

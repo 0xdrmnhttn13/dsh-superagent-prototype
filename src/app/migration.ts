@@ -6,13 +6,19 @@ import { basename } from 'node:path'
 import { z } from 'zod'
 import { isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, type Decision, type Execution, type Follow, type MandateBasis,
   type Reason, type Thread, type Ticket, type TicketInput, type TriggerDisposition } from '../core/index.ts'
-import { feishuChatLink } from '../sources/feishu-channel.ts'
-import { POLL_HORIZON_MS } from '../sources/poll.ts'
+const feishuChatLink = (brand: 'feishu' | 'lark', chatId: string): string => `https://${brand}.cn/client/chat/${encodeURIComponent(chatId)}`
+const POLL_HORIZON_MS = 14 * 24 * 3600_000
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../policy.ts'
 import { autoMergeThreshold, teamDefaults } from './context.ts'
-import { PromptConfigSchema, type PromptConfig, type PromptVersion } from './prompts.ts'
+import { z as schema } from 'zod'
+const PromptConfigSchema = schema.object({ communication: schema.string(), scope: schema.string(), delivery: schema.string(), skills: schema.record(schema.string(), schema.string()).default({}) }).passthrough()
+type PromptConfig = z.infer<typeof PromptConfigSchema>
+interface PromptVersion { revision: number; previousRevision: number | null; savedAt: string; source: string; config: PromptConfig; [key: string]: unknown }
 import type { EffectKind, EffectPayloads } from './effects.ts'
-import { promptsNotice, settingsNotice, subscriptionNotice } from './notices.ts'
+// Preserve legacy effect payloads without loading DSH session or channel adapters.
+const promptsNotice = (revision: number): readonly [string, Record<string, unknown>, string] => [`prompts:${revision}`, { revision }, 'Prompts changed']
+const settingsNotice = (): readonly [string, Record<string, unknown>, string] => ['settings', {}, 'Settings changed']
+const subscriptionNotice = (thread: string): readonly [string, Record<string, unknown>, string] => [`subscription:${thread}`, { thread }, 'Subscription changed']
 import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
