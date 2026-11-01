@@ -1,5 +1,5 @@
 /** Component health registry displayed in the overview and source status panels. */
-import type { Health } from '../sources/host.ts'
+type Health = { state: 'starting' | 'ready' | 'paused' | 'error'; detail: string; at?: string; code?: string; values?: Record<string, string> }
 
 export interface HealthEntry {
   get(): Health | undefined

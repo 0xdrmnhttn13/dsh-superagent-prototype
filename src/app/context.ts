@@ -1,7 +1,7 @@
 /** Built-in prompt sections, role policies, and transcript projections for orchestrator and worker Sessions. */
 import { bundledSkills, promptFile } from './skill-files.ts'
 // Legacy transcript format used only to migrate pre-v11 prompt records.
-type SessionEvent = { type: string; data: any }
+type SessionEvent = { type: string; data: { role: string; content: { type: string }[]; message: { role: string; content: { type: string }[] } } }
 
 
 /** Built-in host-delivery and tool-usage rules shared by all Sessions; a team may override them (`builtInParts`). */
