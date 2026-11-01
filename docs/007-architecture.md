@@ -246,7 +246,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | --- | --- |
 | `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
 | `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
-| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
+| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards; local investigator tools accept structured findings and no channel/PR actions |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
 | `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
@@ -366,7 +366,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/github-trigger.ts` | GitHub comments, reviews, Issue bodies and CI changes as Triggers, and GitHub addresses |
 | `src/sources/local-trigger.ts` | Pure, validated mapping of local investigation events into stable Triggers and Threads, with evidence metadata only |
 | `src/sources/local.ts` | Local SourceKind policy and optional plugin entry, disabled by default |
-| `src/sources/local-ingress.ts` | Owner-only Unix socket for local prompts, evidence metadata, and SourceContext intake |
+| `src/sources/local-ingress.ts` | Owner-only Unix socket for local prompts and authorized history, private evidence metadata, and SourceContext intake |
 | `src/sources/github-pull.ts` | The pull request rules: which pull requests a Ticket follows (`claimPull`, `observePull`), the closes it reports to the Engine, and `pullEndNotices`, the chat notice of a Ticket that ended merged or closed |
 | `src/sources/github-channel.ts` | The GitHub Channel: comments and review thread replies, `sent` or `gone` |
 | `src/sources/github-read.ts` | CI snapshots, repository reads, the `github/` resources, and `githubThreadContext`: an Issue's or pull request's conversation by page |
@@ -414,7 +414,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/local-trigger.spec.ts` | Local investigation Trigger mapping: deterministic identity, follow-up Thread correlation, and schema validation |
 | `tests/local-source.spec.ts` | Disabled local intake and explicit allowlisted admission gate |
 | `tests/local-ingress.spec.ts` | Authenticated intake checks, private evidence storage, input validation, and socket permissions |
-| `tests/local-lifecycle.spec.ts` | Real Engine and SQLite lifecycle for local prompts, follow-ups, digest reads and restart recovery, with a simulated executor |
+| `tests/local-lifecycle.spec.ts` | Real Engine and SQLite lifecycle for local prompts, follow-ups, digest reads, persisted report history and restart recovery, with a simulated executor |
+| `tests/local-evidence-resource.spec.ts` | Ticket-scoped local evidence resource: opt-in, local mandate, reachable triggers, checksums, private-file safety, bounded paging, and worker-only access |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
@@ -523,7 +524,9 @@ Existing main Sessions on `standard` also need explicit timeouts for foreground 
 
 ### Executor tools
 
-Each Executor has six application tools:
+Non-local Executors have six application tools. Local investigation workers instead have only ticket-scoped `orchestrator_read` and a structured `orchestrator_report` (problem statement, evidence examined, hypotheses with supporting/contradicting findings, uncertainty, and next steps). They have an empty inherited-tool allowlist and a dispatch guard that rejects other tools, including scoped tools; no shell, write, web, or subagent tools are granted. The read-only permission preset must be available and verified or the worker fails closed. Their workspace skips the configured prepare shell command. This is an application tool capability boundary, not OS-level confinement of the model-provider process. Reports persist on Assignments in SQLite.
+
+Each non-local Executor has six application tools:
 
 | Tool | Purpose |
 | --- | --- |

@@ -10,6 +10,7 @@ import { sourceContext } from './host.ts'
 
 export const LocalConfigSchema = z.object({
   acceptPrompts: z.boolean().default(false),
+  allowEvidenceRead: z.boolean().default(false),
 }).strict()
 export type LocalConfig = z.infer<typeof LocalConfigSchema>
 
@@ -22,7 +23,10 @@ export const localKind: SourceKind<LocalConfig> = {
   description: { zh: '本地提示词来源；尚无输入接口，默认关闭。', en: 'Local prompt source; no ingress is installed, and intake is off by default.' },
   schema: LocalConfigSchema,
   fields: [{ key: 'acceptPrompts', type: 'switch',
-    label: { zh: '接收本地调查请求', en: 'Accept local investigation requests' } }],
+    label: { zh: '接收本地调查请求', en: 'Accept local investigation requests' } },
+    { key: 'allowEvidenceRead', type: 'switch',
+      label: { zh: '允许工单读取本地证据', en: 'Allow ticket-scoped evidence reads' },
+      hint: { zh: '仅供实验；DSH 执行器尚未具备只读隔离。', en: 'Experimental only. The DSH executor is not yet isolated as read-only.' } }],
   health: [],
   scope: ({ meta }, config) => config.acceptPrompts && typeof meta.investigationId === 'string'
     ? { listened: true, observed: false, row: 'prompt' }

@@ -1,4 +1,4 @@
-# Local investigation intake: implementation plan
+# Local investigation intake and read-only worker
 
 This branch explores adapting dsh-superagent for an engineer who works from **prompts plus evidence** (logs, stack traces, test failures), not GitHub Issues.
 
@@ -30,32 +30,31 @@ Example commands:
 node scripts/sa.mjs status --state-dir /absolute/path/to/state
 node scripts/sa.mjs investigate --state-dir /absolute/path/to/state --prompt 'Inspect synthetic error' --evidence synthetic.log
 node scripts/sa.mjs followup --state-dir /absolute/path/to/state --id <investigationId> --prompt 'New information'
+node scripts/sa.mjs show --state-dir /absolute/path/to/state --id <investigationId>
 ```
 
-The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. The executor is still DSH and may have permissions unrelated to the CLI's scope; this phase is not a verified end-to-end read-only execution environment. A future revision must bind a verified read-only executor and enable safe evidence reads before production usage.
+The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. Local workers use the restricted capability mode described below; the real DSH end-to-end flow has not been exercised here.
 
 ## Phase 4: lifecycle verification and evidence integrity
 
 `tests/local-lifecycle.spec.ts` tests actual local intake against the real Engine, Policy, SourceRegistry and SQLite Store, using a **simulated assessor and executor**. It checks explicit authorization, ticket creation, follow-up input delivery, duplicate rejection, and the persisted ticket and evidence after reopening SQLite.
 
-`readLocalEvidence(stateDir, sha256)` provides a hash-verified, bounded, no-follow, in-process evidence read primitive. **It is not exposed to agents or the local socket**. Never pass arbitrary evidence paths to an agent, and do not treat this test as proof that the live DSH executor is read-only.
+`readLocalEvidence(stateDir, sha256)` provides a hash-verified, bounded, no-follow, in-process evidence read primitive. An authorized ticket worker can read text through `orchestrator_read local/<trigger-id>/evidence/<sha256>` only while evidence reads are explicitly enabled. Never pass arbitrary evidence paths to an agent.
 
-Run `pnpm check` locally before merging. The next step after this baseline is an authorized evidence-reader tool and a sandboxed read-only investigation executor, then full DSH runtime smoke tests.
+Run `pnpm check` locally before merging. A live DSH runtime smoke test is still needed.
 
-## Remaining implementation steps
+## Phase 5: opt-in ticket-scoped evidence reader (experimental)
 
-1. Implement a `SourceKind` for `local` and register it through the existing SourceRegistry. Scope and Policy must only admit explicitly authenticated local requests; never trust actor IDs submitted over HTTP.
-2. Create a **local-only authenticated** ingress with request size limits, nonce/idempotency protection, and explicitly assigned actor identity. Consider Unix domain sockets instead of network endpoints. Call `SourceContext.receive` rather than constructing tickets directly.
-3. Implement a private evidence store under the configured stateDir, outside this public Git repository: safe file copying, SHA-256 checks, file size limits, redaction, and tightly scoped reads. Never put raw logs or absolute secret paths in Trigger text.
-4. Provide commands for creating an investigation, sending follow-ups with the same `investigationId`, showing history, and resuming a ticket through the Engine.
-5. Exercise the full authorization, restart/replay, assessment, ticket, read-only worker, and follow-up flow using synthetic logs. Keep writes disabled by default. Run `pnpm check`.
+`orchestrator_read` now accepts `local/<trigger-id>/evidence/<sha256>` **only from a worker ticket that can reach that local Trigger** and only while the Local Source is enabled with `acceptPrompts: true` and `allowEvidenceRead: true`. The evidence checksum must appear in that specific Trigger metadata. The reader rejects non-text evidence and uses the integrity-checked blob reader. `allowEvidenceRead` defaults to false. Evidence is not available to the unscoped main Session through this resource.
 
-## Example future CLI (not implemented)
+Local-origin Tickets now use a separate capability mode: only ticket-scoped resource reads and structured reports are registered, inherited tools are masked, and a monotonic execution guard rejects shell, writes, network tools and delegation. DSH's `read-only` permission preset is required and verified; if unavailable, local execution fails closed. The normal DSH Executor still runs non-local Tickets unchanged. Reports live on the existing Ticket Assignments. This is an application-tool boundary, not an OS sandbox for a compromised host or provider. Never submit production secrets without reviewing the runtime deployment and data retention policy. Synthetic tests do not constitute a live DSH end-to-end run.
 
-```sh
-sa investigate --prompt 'Inspect Redpanda INVALID_CONFIG; read only' --evidence synthetic.log
-sa evidence add inv-123 synthetic-followup.log
-sa show inv-123
-```
+## Verification limitations
+
+The test suite exercises the real Engine, Policy, Store, SourceRegistry and SQLite restart with a simulated assessor and executor. It does **not** start a DSH daemon or perform an actual model turn. This machine has no `dsh` executable (`command -v dsh` returns nothing); therefore the real `CLI → socket → DSH Session → investigator → report` path has not been verified. Install a compatible DSH `^0.2.1-alpha.2` runtime and repeat the smoke test with synthetic evidence before relying on model-generated results. The capability guard applies to DSH tool dispatch, not host-level process isolation, and there is no evidence retention/erasure workflow.
+
+## CLI integration
+
+`node scripts/sa.mjs` uses the existing private Unix socket. `investigate` creates a fresh investigation ID; `followup --id ID` submits to that investigation's Thread; `show --id ID` returns authorized Ticket/Trigger history and persisted findings; `status` reports connection, actor identity, intake enablement and allowlist status. Use `--event-id ID` to retry a request idempotently. Pi is available as a local CLI (`pi --help`); Codex is not installed here. Both can invoke this CLI as an external command; no speculative provider adapter or MCP bridge is included.
 
 Do not test with confidential production trading logs. Do not assume `addressed: direct` alone grants authorization; the ingress and source policy must enforce who can submit work.

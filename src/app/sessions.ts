@@ -60,6 +60,9 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+/** Local investigations use application resources only; no inherited global tools (including shell, web and delegation). */
+export const INVESTIGATION_TOOLS: readonly string[] = ['orchestrator_read', 'orchestrator_report']
+const localInvestigation = (ticket?: Ticket): boolean => ticket?.mandate.actor.source === 'local'
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -124,7 +127,8 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ticket = ticketId ? this.host.store.tickets.get(ticketId) : undefined
+        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticket && !localInvestigation(ticket) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -148,8 +152,17 @@ export class Sessions {
     if ('error' in result) throw result.error
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
+    const ticket = role === 'worker' ? this.host.store.tickets.get(ticketOfSession(id) ?? '') : undefined
+    if (role === 'worker' && !ticket) throw new Error('Worker session requires a stored ticket')
+    if (localInvestigation(ticket)) {
+      try {
+        if (!ctx.permissionPresets || typeof ctx.permissionPresets.set !== 'function' || typeof ctx.permissionPresets.current !== 'function'
+          || ctx.permissionPresets.resolve('read-only').sandbox !== 'read-only') throw new Error('Unavailable preset')
+        ctx.permissionPresets.set(result.agent.session, 'read-only')
+        if (ctx.permissionPresets.current(result.agent.session) !== 'read-only') throw new Error('Preset changed')
+      } catch { throw new Error('Read-only investigation boundary unavailable') }
+    } else ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await this.decorate(result.agent)
-    ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
@@ -236,6 +249,11 @@ export class Sessions {
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
+    if (localInvestigation(ticket)) {
+      if (!this.ctx.permissionPresets || typeof this.ctx.permissionPresets.current !== 'function'
+        || this.ctx.permissionPresets.current(agent.session) !== 'read-only') throw new Error('Read-only investigation boundary unavailable')
+      binding.disposers.push(...this.investigationOnly(agent, ticket!.id))
+    }
     this.bindings.set(agent, binding)
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
@@ -258,13 +276,15 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
+    for (const tool of host.tools(agent, ticket)) {
+      if (!localInvestigation(ticket) || INVESTIGATION_TOOLS.includes(tool.name)) register(tool.name, tool.description, tool.schema, tool.execute)
+    }
     if (master) {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
+      if (!localInvestigation(ticket)) binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }
   }
   /**
@@ -286,6 +306,16 @@ export class Sessions {
    * (see the executor). Read inherited tools through the parent scope, which includes the preset's tools. The global view
    * misses preset tools; the agent's own view also includes local tools such as subagent, which restrict refuses to name.
    */
+  private investigationOnly(agent: Agent, ticketId: string): (() => void)[] {
+    // Restrict inherited tools and guard scoped or subsequently registered tools at dispatch time.
+    const guard = agent.ctx.tools.guard(execution => {
+      const ticket = this.host.store.tickets.get(ticketId)
+      if (!ticket || !liveTicket(ticket) || !localInvestigation(ticket)) return 'Investigation ticket is not active'
+      return INVESTIGATION_TOOLS.includes(execution.name) ? undefined : 'Local investigation permits only evidence reads and reports'
+    })
+    try { return [guard, agent.ctx.tools.restrict({ allow: [] })] }
+    catch (error) { guard(); throw error }
+  }
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
@@ -308,7 +338,9 @@ export class Sessions {
     }
     const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    const ticket = this.host.store.tickets.get(ticketId)
+    this.bindings.set(agent, { disposers: localInvestigation(ticket) ? [agent.ctx.tools.restrict({ allow: [] }),
+      agent.ctx.tools.guard(() => 'Local investigation cannot delegate to subagents')] : this.workOnly(agent, ticketId), subagent: true })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

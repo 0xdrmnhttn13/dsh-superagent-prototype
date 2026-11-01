@@ -246,6 +246,11 @@ export class DshExecutor implements Executor {
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
+    // Local investigations never execute an operator-supplied workspace prepare shell command.
+    if (ticket.mandate.actor.source === 'local') {
+      await mkdir(directory, { recursive: true, mode: 0o700 })
+      return
+    }
     await mkdir(dirname(directory), { recursive: true })
     const command = this.host.store.settings().executor.prepare.trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))

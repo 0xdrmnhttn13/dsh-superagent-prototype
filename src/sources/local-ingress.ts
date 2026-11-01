@@ -6,7 +6,7 @@ import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdi
 import { createServer, connect, type Server } from 'node:net'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { key, type ReceiveResult, type Trigger } from '../core/index.ts'
+import { key, latestReport, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { localTrigger, LOCAL_SOURCE } from './local-trigger.ts'
 
 const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
@@ -23,7 +23,8 @@ const Submit = z.object({
   text: z.string().trim().min(1).max(16_384),
   evidence: z.array(EvidenceUpload).max(4).default([]),
 }).strict()
-const Request = z.discriminatedUnion('kind', [Submit, z.object({ kind: z.literal('status') }).strict()])
+const Show = z.object({ kind: z.literal('show'), investigationId: ID }).strict()
+const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.literal('status') }).strict()])
 export type LocalRequest = z.input<typeof Request>
 
 export interface IngressHost {
@@ -31,7 +32,9 @@ export interface IngressHost {
   source: {
     config(kind: string): { acceptPrompts: boolean } | undefined
     receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
-    triggers: { get(id: string): Trigger | undefined }
+    threads?: { get(key: string): { subscriptions: string[] } | undefined }
+    tickets?: { get(id: string): Ticket | undefined }
+    triggers: { get(id: string): Trigger | undefined; latest?(thread: string): Trigger | undefined }
   }
   allowedActor(actor: string): boolean
 }
@@ -48,7 +51,7 @@ export const localSocketPath = (stateDir: string): string => join(stateDir, 'loc
 function privateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 })
   const stat = lstatSync(path)
-  if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+  if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700 || (process.getuid && stat.uid !== process.getuid())) {
     throw new Error(`Refusing unsafe state directory permissions: ${path} (require owner-only 0700)`)
   }
 }
@@ -71,7 +74,7 @@ function evidenceOf(stateDir: string, uploads: z.infer<typeof EvidenceUpload>[])
       }
     }
     const stored = lstatSync(path)
-    if (!stored.isFile() || (stored.mode & 0o077) !== 0 || (process.getuid && stored.uid !== process.getuid())
+    if (!stored.isFile() || (stored.mode & 0o777) !== 0o600 || (process.getuid && stored.uid !== process.getuid())
       || createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
       throw new Error('Unsafe or invalid stored evidence')
     }
@@ -93,7 +96,7 @@ export function readLocalEvidence(stateDir: string, sha256: string): Buffer {
   try {
     const stat = fstatSync(fd)
     if (!stat.isFile() || stat.size > MAX_EVIDENCE || stat.size === 0
-      || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+      || (stat.mode & 0o777) !== 0o600 || (process.getuid && stat.uid !== process.getuid())) {
       throw new Error('Unsafe evidence file')
     }
     const data = readFileSync(fd)
@@ -114,8 +117,33 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
   const allowed = host.allowedActor(actor)
   if (request.kind === 'status') return { ok: true, actor, enabled, allowed }
   if (!enabled || !allowed) return { ok: false, error: !enabled ? 'local_intake_disabled' : 'local_actor_not_allowlisted', actor }
+  if (request.kind === 'show') {
+    const thread = host.source.threads?.get(`local:${request.investigationId}`)
+    const tickets = (thread?.subscriptions ?? []).flatMap(id => host.source.tickets?.get(id) ?? [])
+      .filter(ticket => ticket.mandate.actor.source === LOCAL_SOURCE && ticket.mandate.actor.id === actor
+        && host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId === request.investigationId)
+    const triggers = tickets.flatMap(ticket => [ticket.origin.triggerId, ...ticket.origin.triggerIds,
+      ...ticket.inputs.flatMap(input => input.kind === 'trigger' ? [input.triggerId] : [])])
+      .map(id => host.source.triggers.get(id)).filter((trigger): trigger is Trigger => !!trigger && trigger.source === LOCAL_SOURCE
+        && trigger.actor.id === actor && trigger.meta.investigationId === request.investigationId)
+      .filter((trigger, index, all) => all.findIndex(item => item.id === trigger.id) === index)
+    if (!tickets.length) return { ok: false, error: 'unknown_investigation' }
+    return { ok: true, investigationId: request.investigationId,
+      triggers: triggers.map(trigger => ({ triggerId: trigger.id, at: trigger.at, text: trigger.text, evidence: trigger.meta.evidence })),
+      tickets: tickets.map(ticket => ({ ticketId: ticket.id, title: ticket.title, ended: ticket.ended ?? null,
+        inputs: ticket.inputs.map(input => input.kind === 'trigger' ? { kind: input.kind, triggerId: input.triggerId, at: input.at }
+          : { kind: input.kind, at: input.at }),
+        assignments: ticket.assignments.map(assignment => ({ id: assignment.id, state: assignment.state,
+          report: assignment.report ? { state: assignment.report.state, at: assignment.report.at,
+            findings: (() => { try { return JSON.parse(assignment.report.summary) as unknown } catch { return assignment.report.summary } })() } : null })),
+        latestReport: latestReport(ticket)?.state ?? null })) }
+  }
   const id = key(LOCAL_SOURCE, request.eventId)
-  if (host.source.triggers.get(id)) return { ok: true, status: 'duplicate', triggerId: id, investigationId: request.investigationId }
+  const previous = host.source.triggers.get(id)
+  if (previous) return previous.source === LOCAL_SOURCE && previous.actor.id === actor
+    && previous.meta.investigationId === request.investigationId
+    ? { ok: true, status: 'duplicate', triggerId: id, investigationId: request.investigationId }
+    : { ok: false, error: 'event_id_conflict' }
   const evidence = evidenceOf(host.stateDir, request.evidence)
   const trigger = localTrigger({
     id: request.eventId, investigationId: request.investigationId, actor,
