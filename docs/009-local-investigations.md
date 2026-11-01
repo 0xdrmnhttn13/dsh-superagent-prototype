@@ -1,4 +1,4 @@
-# Local investigation intake: implementation plan
+# Local investigation intake and read-only worker
 
 This branch explores adapting dsh-superagent for an engineer who works from **prompts plus evidence** (logs, stack traces, test failures), not GitHub Issues.
 
@@ -46,7 +46,7 @@ Run `pnpm check` locally before merging. The next step after this baseline is an
 
 `orchestrator_read` now accepts `local/<trigger-id>/evidence/<sha256>` **only from a worker ticket that can reach that local Trigger** and only while the Local Source is enabled with `acceptPrompts: true` and `allowEvidenceRead: true`. The evidence checksum must appear in that specific Trigger metadata. The reader rejects non-text evidence and uses the integrity-checked blob reader. `allowEvidenceRead` defaults to false. Evidence is not available to the unscoped main Session through this resource.
 
-**This is NOT a read-only investigator sandbox.** The existing DSH worker preset still offers shell and filesystem write tools. Do not enable evidence reading for private or production material until the runtime has a separately enforced read-only preset/capability boundary, not merely a prompt instruction. Tests exercise the resource boundary with synthetic evidence; no Codex/Pi integration is implemented yet.
+Local-origin Tickets now use a separate capability mode: only ticket-scoped resource reads and structured reports are registered, inherited tools are masked, and a monotonic execution guard rejects shell, writes, network tools and delegation. DSH's `read-only` permission preset is required and verified; if unavailable, local execution fails closed. The normal DSH Executor still runs non-local Tickets unchanged. Reports live on the existing Ticket Assignments. This is an application-tool boundary, not an OS sandbox for a compromised host or provider. Never submit production secrets without reviewing the runtime deployment and data retention policy. Synthetic tests do not constitute a live DSH end-to-end run.
 
 ## Remaining implementation steps
 

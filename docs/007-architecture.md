@@ -246,7 +246,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | --- | --- |
 | `src/app/runtime.ts` | The composition root: builds the parts with the interfaces they use, registers the routes and the Source host, and starts and stops dsh-superagent |
 | `src/app/notices.ts` | Domain events and worker reports into notices and relays for the main Session |
-| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
+| `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards; local investigator tools accept structured findings and no channel/PR actions |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
 | `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
@@ -524,7 +524,9 @@ Existing main Sessions on `standard` also need explicit timeouts for foreground 
 
 ### Executor tools
 
-Each Executor has six application tools:
+Non-local Executors have six application tools. Local investigation workers instead have only ticket-scoped `orchestrator_read` and a structured `orchestrator_report` (problem statement, evidence examined, hypotheses with supporting/contradicting findings, uncertainty, and next steps). They have an empty inherited-tool allowlist and a dispatch guard that rejects other tools, including scoped tools; no shell, write, web, or subagent tools are granted. The read-only permission preset must be available and verified or the worker fails closed. Their workspace skips the configured prepare shell command. This is an application tool capability boundary, not OS-level confinement of the model-provider process. Reports persist on Assignments in SQLite.
+
+Each non-local Executor has six application tools:
 
 | Tool | Purpose |
 | --- | --- |

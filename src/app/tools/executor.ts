@@ -10,6 +10,41 @@ import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
+/** Structured local investigation report, persisted as the existing Assignment report summary. */
+export const InvestigationFindings = z.object({
+  problem_statement: z.string().trim().min(1).max(4000),
+  evidence_examined: z.array(z.string().trim().min(1).max(500)).max(32),
+  hypotheses: z.array(z.object({ hypothesis: z.string().trim().min(1).max(1000),
+    supporting: z.array(z.string().trim().min(1).max(1000)).max(16),
+    contradicting: z.array(z.string().trim().min(1).max(1000)).max(16) }).strict()).max(16),
+  remaining_uncertainty: z.array(z.string().trim().min(1).max(1000)).max(16),
+  recommended_next_steps: z.array(z.string().trim().min(1).max(1000)).max(16),
+}).strict()
+
+export function investigationTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
+  return [readTool('Read paginated resources of this investigation ticket only.', true,
+    (resource, offset, limit, signal) => {
+      const current = host.store.tickets.get(ticket.id)
+      if (!current || !liveTicket(current) || current.mandate.actor.source !== 'local') throw new Error('Investigation ticket is not active')
+      if (resource !== `ticket/${ticket.id}` && !resource.startsWith(`ticket/${ticket.id}/`)
+        && !resource.startsWith('trigger/') && !resource.startsWith('thread/')
+        && !resource.startsWith('local/')) throw new Error('Resource outside local investigation')
+      return readResource(host.resources, resource, offset, limit, ticket.id, signal)
+    }),
+  tool({ name: 'orchestrator_report', description: 'Record structured read-only investigation findings on this ticket.',
+    schema: z.object({ state: z.enum(['progress', 'ready', 'blocked', 'failed']), findings: InvestigationFindings }).strict(),
+    execute: async args => host.store.atomic(() => {
+      const current = host.store.tickets.get(ticket.id)
+      if (!current || !liveTicket(current) || current.mandate.actor.source !== 'local') throw new Error('Investigation ticket is not active')
+      const report = { state: args.state, summary: JSON.stringify(args.findings) }
+      const updated = host.engine.report(ticket.id, report)
+      const relay = reportRelay(updated, report)
+      if (relay) host.sessions.relay(relay.id, relay.text)
+      return { reported: true, ticket_id: ticket.id }
+    }) }),
+  ]
+}
+
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
