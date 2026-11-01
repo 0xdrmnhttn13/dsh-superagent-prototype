@@ -232,7 +232,7 @@ const ROUTES: readonly Route[] = [
     }
     const bytes = readLocalEvidence(host.stateDir, match[2]!)
     const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    if (decoded.includes('\\0')) throw new Error('Binary evidence is not readable as text')
+    if (decoded.includes('\0')) throw new Error('Binary evidence is not readable as text')
     return text(read, decoded)
   }],
   ['trigger/', async read => {
