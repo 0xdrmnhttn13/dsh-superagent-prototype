@@ -51,11 +51,20 @@ export function apply(ctx: Context): void {
   ctx.effect(() => {
     const host = ctx.orchestrator
     const source = sourceContext(host, localKind)
-    return listenLocalIngress({
-      stateDir: source.deployment.stateDir,
-      source,
-      allowedActor: actor => actor === localActor() &&
-        host.sources.policyPart(LOCAL_SOURCE)?.allowed.some(entry => entry.id === actor) === true,
+    let disposed = false
+    const start = source.ready.then(() => {
+      if (disposed || !source.configured()) return undefined
+      return listenLocalIngress({
+        stateDir: source.deployment.stateDir,
+        source,
+        allowedActor: actor => actor === localActor() &&
+          host.sources.policyPart(LOCAL_SOURCE)?.allowed.some(entry => entry.id === actor) === true,
+      })
     })
+    return async () => {
+      disposed = true
+      const stop = await start
+      if (stop) await stop()
+    }
   }, 'local: owner-only socket')
 }
