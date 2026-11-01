@@ -23,7 +23,7 @@ describe('local Source registration and gate', () => {
     const settings = SettingsSchema.parse({})
     const sources = new SourceRegistry(() => settings)
     sources.register(localKind)
-    expect(sources.instance('local')?.config).toEqual({ acceptPrompts: false })
+    expect(sources.instance('local')?.config).toEqual({ acceptPrompts: false, allowEvidenceRead: false })
     expect(sources.scope(localTrigger(event))).toMatchObject({ listened: false })
   })
   it('listens only when explicitly enabled', () => {
