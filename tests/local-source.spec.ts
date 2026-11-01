@@ -38,7 +38,8 @@ describe('local Source registration and gate', () => {
       subscriptions: [], correlated: [], pending: [], meta: {} }
     expect(gate.gate(trigger, thread, [])).toMatchObject({ admissible: true, strength: 'explicit' })
     expect(setup(true, []).gate.gate(trigger, thread, [])).toMatchObject({ admissible: false })
-    expect(setup(false, ['owner']).gate.gate(trigger, thread, [])).toMatchObject({ admissible: false })
+    // Intake filters disabled Sources before Policy.gate is called.
+    expect(setup(false, ['owner']).sources.scope(trigger)).toMatchObject({ listened: false })
   })
   it('cannot grant work on actor identity alone without authentication by the future ingress', () => {
     expect(localKind.channel).toBeUndefined()
