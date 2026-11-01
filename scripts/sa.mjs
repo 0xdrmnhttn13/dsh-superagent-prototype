@@ -17,18 +17,22 @@ if (!stateDir) {
 }
 let input
 if (cmd === 'status') input = { kind: 'status' }
-else if (cmd === 'investigate' || cmd === 'followup') {
+else if (cmd === 'show') {
+  const investigationId = option('--id')
+  if (!investigationId) { console.error('show needs --id'); process.exit(2) }
+  input = { kind: 'show', investigationId }
+} else if (cmd === 'investigate' || cmd === 'followup') {
   const text = option('--prompt')
   if (!text) { console.error('Missing --prompt'); process.exit(2) }
   const investigationId = option('--id') || (cmd === 'investigate' ? randomUUID() : undefined)
   if (!investigationId) { console.error('followup needs --id'); process.exit(2) }
-  const eventId = randomUUID()
+  const eventId = option('--event-id') || randomUUID()
   const evidenceFile = option('--evidence')
   const evidence = evidenceFile
     ? [{ label: evidenceFile.split('/').at(-1), base64: readFileSync(evidenceFile).toString('base64') }]
     : []
   input = { kind: 'submit', eventId, investigationId, text, evidence }
-} else { console.error('Usage: node scripts/sa.mjs status|investigate|followup --state-dir DIR [--prompt TEXT] [--id ID] [--evidence FILE]'); process.exit(2) }
+} else { console.error('Usage: node scripts/sa.mjs status|investigate|followup|show --state-dir DIR [--prompt TEXT] [--id ID] [--event-id ID] [--evidence FILE]'); process.exit(2) }
 const socket = connect(join(stateDir, 'local.sock'))
 socket.setTimeout(10_000, () => { console.error('Socket timeout'); socket.destroy(); process.exitCode = 1 })
 const chunks = []

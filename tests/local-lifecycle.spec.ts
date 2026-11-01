@@ -39,6 +39,8 @@ function rig(stateDir: string) {
     source: {
       config: (kind: string) => kind === 'local' ? sources.instance<{ acceptPrompts: boolean }>('local')?.config : undefined,
       receive: (trigger: Trigger) => engine.receive(trigger),
+      threads: { get: (id: string) => store.threads.get(id) },
+      tickets: { get: (id: string) => store.tickets.get(id) },
       triggers: { get: (id: string) => store.triggers.get(id) },
     },
     allowedActor: (actor: string) => actor === localActor(),
@@ -80,6 +82,13 @@ describe('local investigation lifecycle (real Engine and SQLite; simulated asses
     expect(r.launches).toContain(ticketId)
     expect(r.store.threads.get('local:investigation-1')?.subscriptions).toContain(ticketId)
     const assignment = r.store.tickets.get(ticketId)!.assignments[0]!
+    const findings = { problem_statement: 'Synthetic config failure', evidence_examined: [digest],
+      hypotheses: [{ hypothesis: 'Topic setting invalid', supporting: ['INVALID_CONFIG'], contradicting: [] }],
+      remaining_uncertainty: ['Which setting'], recommended_next_steps: ['Inspect topic config'] }
+    r.engine.report(ticketId, { state: 'progress', summary: JSON.stringify(findings) })
+    const shown = await processLocalRequest(r.host, { kind: 'show', investigationId: 'investigation-1' })
+    expect(shown.tickets).toEqual([expect.objectContaining({ ticketId,
+      assignments: [expect.objectContaining({ report: expect.objectContaining({ findings }) })] })])
     r.engine.assignmentStarted(ticketId, assignment.id)
     const second = await processLocalRequest(r.host, {
       kind: 'submit', eventId: 'event-2', investigationId: 'investigation-1',
@@ -108,6 +117,7 @@ describe('local investigation lifecycle (real Engine and SQLite; simulated asses
         first.triggerId, second.triggerId,
       ])
       expect(readLocalEvidence(dir, digest).toString('utf8')).toBe(raw)
+      expect(JSON.parse(restored.tickets.get(ticketId)!.assignments[0]!.report!.summary)).toEqual(findings)
     } finally { restored.close() }
   })
   it('rejects a changed evidence digest and unsafe filesystem objects', async () => {

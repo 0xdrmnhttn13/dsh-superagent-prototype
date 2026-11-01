@@ -30,9 +30,10 @@ Example commands:
 node scripts/sa.mjs status --state-dir /absolute/path/to/state
 node scripts/sa.mjs investigate --state-dir /absolute/path/to/state --prompt 'Inspect synthetic error' --evidence synthetic.log
 node scripts/sa.mjs followup --state-dir /absolute/path/to/state --id <investigationId> --prompt 'New information'
+node scripts/sa.mjs show --state-dir /absolute/path/to/state --id <investigationId>
 ```
 
-The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. The executor is still DSH and may have permissions unrelated to the CLI's scope; this phase is not a verified end-to-end read-only execution environment. A future revision must bind a verified read-only executor and enable safe evidence reads before production usage.
+The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. Local workers use the restricted capability mode described below; the real DSH end-to-end flow has not been exercised here.
 
 ## Phase 4: lifecycle verification and evidence integrity
 
