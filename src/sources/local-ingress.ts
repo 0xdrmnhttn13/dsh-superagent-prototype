@@ -48,7 +48,7 @@ export const localSocketPath = (stateDir: string): string => join(stateDir, 'loc
 function privateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 })
   const stat = lstatSync(path)
-  if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+  if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700 || (process.getuid && stat.uid !== process.getuid())) {
     throw new Error(`Refusing unsafe state directory permissions: ${path} (require owner-only 0700)`)
   }
 }
@@ -71,7 +71,7 @@ function evidenceOf(stateDir: string, uploads: z.infer<typeof EvidenceUpload>[])
       }
     }
     const stored = lstatSync(path)
-    if (!stored.isFile() || (stored.mode & 0o077) !== 0 || (process.getuid && stored.uid !== process.getuid())
+    if (!stored.isFile() || (stored.mode & 0o777) !== 0o600 || (process.getuid && stored.uid !== process.getuid())
       || createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
       throw new Error('Unsafe or invalid stored evidence')
     }
@@ -93,7 +93,7 @@ export function readLocalEvidence(stateDir: string, sha256: string): Buffer {
   try {
     const stat = fstatSync(fd)
     if (!stat.isFile() || stat.size > MAX_EVIDENCE || stat.size === 0
-      || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+      || (stat.mode & 0o777) !== 0o600 || (process.getuid && stat.uid !== process.getuid())) {
       throw new Error('Unsafe evidence file')
     }
     const data = readFileSync(fd)

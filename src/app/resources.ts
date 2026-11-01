@@ -6,7 +6,7 @@ import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
-import { readLocalEvidence } from '../sources/local-ingress.ts'
+import { localActor, readLocalEvidence } from '../sources/local-ingress.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -222,13 +222,19 @@ const ROUTES: readonly Route[] = [
       throw new Error('Local evidence reads are disabled')
     }
     const ticket = host.store.tickets.get(ticketId)
+    if (!ticket || ticket.mandate.actor.source !== 'local' || ticket.mandate.actor.id !== localActor()) {
+      throw new Error('Local evidence requires an authorized local ticket')
+    }
     const evidenceTrigger = trigger(host, match[1]!, ticketId)
-    if (!ticket || evidenceTrigger.source !== 'local' || !readable(host, ticket, evidenceTrigger)) {
+    if (evidenceTrigger.source !== 'local' || !readable(host, ticket, evidenceTrigger)) {
       throw new Error('Local evidence is not reachable from this ticket')
     }
     const refs = Array.isArray(evidenceTrigger.meta.evidence) ? evidenceTrigger.meta.evidence : []
     if (!refs.some(ref => typeof ref === 'object' && ref !== null && 'sha256' in ref && ref.sha256 === match[2])) {
       throw new Error('Evidence digest not attached to this trigger')
+    }
+    if (!Number.isSafeInteger(read.offset) || read.offset < 0 || read.limit !== undefined && (!Number.isSafeInteger(read.limit) || read.limit < 1 || read.limit > 8000)) {
+      throw new Error('Invalid evidence page')
     }
     const bytes = readLocalEvidence(host.stateDir, match[2]!)
     const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
@@ -329,6 +335,7 @@ export async function readResource(host: ResourceHost, resource: string, offset:
   const name = resource.replace(/^event\//, 'trigger/').replace(/^task\//, 'ticket/').replace(/^observation\//, 'decision/')
   const route = ROUTES.find(([route]) => route.endsWith('/') ? name.startsWith(route) : name === route)
   if (!route) throw new Error('Unknown context resource')
+  // The caller's session identity, not a caller-supplied ticket id, is the authority for private evidence.
   const sessionId = ticketId ? workerSessionId(ticketId) : host.masterId
   const rest = route[0].endsWith('/') ? name.slice(route[0].length) : ''
   return route[1]({ host, resource: name, rest, offset, sessionId, ...limit ? { limit } : {}, ...ticketId ? { ticketId } : {},

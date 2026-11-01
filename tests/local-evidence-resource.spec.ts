@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Store } from '../src/app/store.ts'
@@ -50,10 +50,35 @@ describe('local evidence resources', () => {
     const resource = `local/${triggerId}/evidence/${digest}`
     const allowed = await readResource(host, resource, 0, 8000, 'ticket-a') as { text: string }
     expect(allowed.text).toContain('ONLY_IN_FILE')
+    const page = await readResource(host, resource, 0, 8, 'ticket-a') as { text: string; next_offset: number }
+    const rest = await readResource(host, resource, page.next_offset, 8000, 'ticket-a') as { text: string; next_offset: null }
+    expect(page.text + rest.text).toBe(contents)
+    expect(rest.next_offset).toBeNull()
+    await expect(readResource(host, resource, -1, 8, 'ticket-a')).rejects.toThrow('Invalid evidence page')
+    await expect(readResource(host, resource, 0, 8001, 'ticket-a')).rejects.toThrow('Invalid evidence page')
+    store.tickets.save({ ...ticket, id: 'ticket-foreign', mandate: { ...ticket.mandate, actor: { source: 'github', id: 'someone' } } })
+    await expect(readResource(host, resource, 0, 8, 'ticket-foreign')).rejects.toThrow('authorized local ticket')
+    await expect(readResource(host, `local/${triggerId}/evidence/../${digest}`, 0, 8, 'ticket-a')).rejects.toThrow('Unknown local')
     await expect(readResource(host, resource, 0, 8000, 'ticket-b')).rejects.toThrow()
     await expect(readResource(host, resource, 0, 8000)).rejects.toThrow('worker ticket')
     await expect(readResource(host, `local/${triggerId}/evidence/${'0'.repeat(64)}`, 0, 8000, 'ticket-a'))
       .rejects.toThrow('not attached')
+    const file = join(dir, 'local-evidence', digest)
+    writeFileSync(file, 'tampered')
+    await expect(readResource(host, resource, 0, 8, 'ticket-a')).rejects.toThrow('digest mismatch')
+    rmSync(file)
+    symlinkSync(join(dir, 'orchestrator.sqlite'), file)
+    await expect(readResource(host, resource, 0, 8, 'ticket-a')).rejects.toThrow()
+    rmSync(file)
+    writeFileSync(file, contents)
+    chmodSync(file, 0o644)
+    await expect(readResource(host, resource, 0, 8, 'ticket-a')).rejects.toThrow('Unsafe evidence file')
+    chmodSync(file, 0o600)
+    rmSync(join(dir, 'local-evidence'), { recursive: true })
+    symlinkSync(dir, join(dir, 'local-evidence'))
+    await expect(readResource(host, resource, 0, 8, 'ticket-a')).rejects.toThrow('unsafe state directory')
+    rmSync(join(dir, 'local-evidence'))
+    mkdirSync(join(dir, 'local-evidence'), { mode: 0o700 })
     store.saveSettings(settings(false))
     await expect(readResource(host, resource, 0, 8000, 'ticket-a')).rejects.toThrow('disabled')
     store.close()
