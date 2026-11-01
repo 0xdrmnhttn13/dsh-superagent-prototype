@@ -42,6 +42,12 @@ The CLI returns a Trigger ID and investigation ID, **not an immediately created 
 
 Run `pnpm check` locally before merging. The next step after this baseline is an authorized evidence-reader tool and a sandboxed read-only investigation executor, then full DSH runtime smoke tests.
 
+## Phase 5: opt-in ticket-scoped evidence reader (experimental)
+
+`orchestrator_read` now accepts `local/<trigger-id>/evidence/<sha256>` **only from a worker ticket that can reach that local Trigger** and only while the Local Source is enabled with `acceptPrompts: true` and `allowEvidenceRead: true`. The evidence checksum must appear in that specific Trigger metadata. The reader rejects non-text evidence and uses the integrity-checked blob reader. `allowEvidenceRead` defaults to false. Evidence is not available to the unscoped main Session through this resource.
+
+**This is NOT a read-only investigator sandbox.** The existing DSH worker preset still offers shell and filesystem write tools. Do not enable evidence reading for private or production material until the runtime has a separately enforced read-only preset/capability boundary, not merely a prompt instruction. Tests exercise the resource boundary with synthetic evidence; no Codex/Pi integration is implemented yet.
+
 ## Remaining implementation steps
 
 1. Implement a `SourceKind` for `local` and register it through the existing SourceRegistry. Scope and Policy must only admit explicitly authenticated local requests; never trust actor IDs submitted over HTTP.
