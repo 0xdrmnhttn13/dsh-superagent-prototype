@@ -20,6 +20,20 @@ The optional `local-watch` plugin now registers `SourceKind` with the existing S
 
 This is intentionally **not a working investigation integration**. There is no evidence payload store, no local ticket creation transport, and no Codex/Pi executor. The existing GitHub and Feishu sources are untouched.
 
+## Phase 3: experimental local intake
+
+An owner-only Unix socket and minimal client now exist, but the optional plugin remains disabled in `cordis.patch.yml`, and the Source config also defaults to not accepting prompts. In your DSH deployment, only after reviewing security and explicitly enabling the plugin, configure Local Source `acceptPrompts` and allowlist `uid-<your numeric OS UID>`. Its filesystem socket is `<stateDir>/local.sock` and evidence files are under `<stateDir>/local-evidence` (outside this repository). Socket and stored evidence permissions are owner-only. Never submit sensitive production logs; evidence is stored privately, but model/tool exposure and retention controls need additional work.
+
+Example commands:
+
+```sh
+node scripts/sa.mjs status --state-dir /absolute/path/to/state
+node scripts/sa.mjs investigate --state-dir /absolute/path/to/state --prompt 'Inspect synthetic error' --evidence synthetic.log
+node scripts/sa.mjs followup --state-dir /absolute/path/to/state --id <investigationId> --prompt 'New information'
+```
+
+The CLI returns a Trigger ID and investigation ID, **not an immediately created Ticket ID**. The existing asynchronous Eval and authorization pipeline still decides whether to create a ticket. The executor is still DSH and may have permissions unrelated to the CLI's scope; this phase is not a verified end-to-end read-only execution environment. A future revision must bind a verified read-only executor and enable safe evidence reads before production usage.
+
 ## Remaining implementation steps
 
 1. Implement a `SourceKind` for `local` and register it through the existing SourceRegistry. Scope and Policy must only admit explicitly authenticated local requests; never trust actor IDs submitted over HTTP.
