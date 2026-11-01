@@ -14,6 +14,12 @@ Initial executor can remain DSH; a Codex/Pi executor adapter is a separate phase
 
 **This does not yet accept prompts, create tickets, store evidence files, or run an executor.** It must not be advertised as a working CLI/MCP integration.
 
+## Phase 2: local Source registration
+
+The optional `local-watch` plugin now registers `SourceKind` with the existing SourceRegistry, but stays **disabled in the bundle**. Even when explicitly installed, its `acceptPrompts` setting defaults to false and its Source-specific Policy requires an allowlisted actor. No API, CLI or socket ingress exists yet. An actor ID sent by a future caller must be independently authenticated; enabling a switch is not proof of identity.
+
+This is intentionally **not a working investigation integration**. There is no evidence payload store, no local ticket creation transport, and no Codex/Pi executor. The existing GitHub and Feishu sources are untouched.
+
 ## Remaining implementation steps
 
 1. Implement a `SourceKind` for `local` and register it through the existing SourceRegistry. Scope and Policy must only admit explicitly authenticated local requests; never trust actor IDs submitted over HTTP.
