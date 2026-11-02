@@ -7,7 +7,12 @@ const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
 const Task = z.object({ id: ID, title: z.string().trim().min(1).max(500), state: z.enum(['open', 'claimed', 'done']),
   claimedBy: ID.optional(), createdAt: z.string(), updatedAt: z.string() }).strict()
 const Message = z.object({ id: ID, taskId: ID.optional(), actor: ID, text: z.string().trim().min(1).max(4000), at: z.string() }).strict()
-export const Board = z.object({ ticketId: ID, tasks: z.array(Task).max(100), messages: z.array(Message).max(500) }).strict()
+const Proposal = z.object({ id: ID, kind: z.enum(['task', 'invite']), actor: ID, title: Task.shape.title.optional(),
+  agentId: ID.optional(), reason: z.string().trim().min(1).max(2000), state: z.enum(['pending', 'approved', 'rejected']), at: z.string() }).strict()
+const Progress = z.object({ id: ID, actor: ID, taskId: ID.optional(), kind: z.enum(['started', 'result', 'proposal', 'approval', 'paused', 'failed']),
+  explanation: z.string().trim().min(1).max(2000), at: z.string() }).strict()
+export const Board = z.object({ ticketId: ID, tasks: z.array(Task).max(100), messages: z.array(Message).max(500),
+  proposals: z.array(Proposal).max(100).default([]), progress: z.array(Progress).max(500).default([]) }).strict()
 export type Board = z.infer<typeof Board>
 export const AgentConfig = z.object({ id: ID, kind: z.enum(['local', 'external']), endpoint: z.url().optional(),
   tokenEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/).optional(), tickets: z.array(ID).max(100) }).strict()
@@ -20,6 +25,8 @@ export const BoardAction = z.discriminatedUnion('op', [
   z.object({ op: z.literal('claim'), ticketId: ID, taskId: ID }).strict(),
   z.object({ op: z.literal('complete'), ticketId: ID, taskId: ID }).strict(),
   z.object({ op: z.literal('message'), ticketId: ID, taskId: ID.optional(), text: Message.shape.text }).strict(),
+  z.object({ op: z.literal('propose_task'), ticketId: ID, title: Task.shape.title, reason: Proposal.shape.reason }).strict(),
+  z.object({ op: z.literal('propose_invite'), ticketId: ID, agentId: ID, reason: Proposal.shape.reason }).strict(),
 ])
 export type BoardAction = z.infer<typeof BoardAction>
 const key = (ticketId: string) => `collaboration:board:${ticketId}`
@@ -42,7 +49,7 @@ export class Collaboration {
   }
   board(ticketId: string): Board {
     this.ticket(ticketId)
-    return Board.parse(this.store.get(key(ticketId)) ?? { ticketId, tasks: [], messages: [] })
+    return Board.parse(this.store.get(key(ticketId)) ?? { ticketId, tasks: [], messages: [], proposals: [], progress: [] })
   }
   registry(): Registry { return Registry.parse(this.store.get(agentsKey) ?? { agents: [] }) }
   /** Owner approval is required even when an agent is already in the registry. Never persist plaintext tokens. */
@@ -100,6 +107,35 @@ export class Collaboration {
       return board
     })
   }
+  resolve(ticketId: string, proposalId: string, approve: boolean): Board {
+    return this.store.atomic(() => {
+      const board = this.board(ticketId)
+      const proposal = board.proposals.find(item => item.id === proposalId)
+      if (!proposal || proposal.state !== 'pending') throw new Error('Proposal not pending')
+      if (approve && proposal.kind === 'invite') {
+        // The owner must separately approve the invitee's endpoint/credentials through approve().
+        this.approved(ticketId, proposal.agentId!)
+      }
+      proposal.state = approve ? 'approved' : 'rejected'
+      if (approve && proposal.kind === 'task') {
+        board.tasks.push({ id: randomUUID(), title: proposal.title!, state: 'open', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+      }
+      board.progress.push({ id: randomUUID(), actor: owner(), kind: 'approval', at: new Date().toISOString(),
+        explanation: `${approve ? 'Approved' : 'Rejected'} ${proposal.kind} proposal ${proposal.id}: ${proposal.reason}` })
+      const parsed = Board.parse(board)
+      this.store.set(key(ticketId), parsed)
+      return parsed
+    })
+  }
+  event(ticketId: string, actor: string, kind: z.infer<typeof Progress>['kind'], explanation: string, taskId?: string): Board {
+    return this.store.atomic(() => {
+      const board = this.board(ticketId)
+      board.progress.push({ id: randomUUID(), actor, kind, explanation: explanation.slice(0, 2000), at: new Date().toISOString(), ...(taskId ? { taskId } : {}) })
+      const parsed = Board.parse(board)
+      this.store.set(key(ticketId), parsed)
+      return parsed
+    })
+  }
   act(actorId: string, raw: unknown, token?: string): Board {
     const action = BoardAction.parse(raw)
     const agent = actorId === owner() ? undefined : token === undefined
@@ -111,6 +147,13 @@ export class Collaboration {
       if (action.op === 'task') {
         if (agent) throw new Error('Only owner can create tasks')
         board.tasks.push({ id: randomUUID(), title: action.title, state: 'open', createdAt: now, updatedAt: now })
+      } else if (action.op === 'propose_task' || action.op === 'propose_invite') {
+        if (!agent) throw new Error('Only an approved agent can propose work')
+        const proposal = { id: randomUUID(), kind: action.op === 'propose_task' ? 'task' as const : 'invite' as const,
+          actor: actorId, reason: action.reason, state: 'pending' as const, at: now,
+          ...(action.op === 'propose_task' ? { title: action.title } : { agentId: action.agentId }) }
+        board.proposals.push(proposal)
+        board.progress.push({ id: randomUUID(), actor: actorId, kind: 'proposal', at: now, explanation: action.reason })
       } else {
         const task = 'taskId' in action ? board.tasks.find(item => item.id === action.taskId) : undefined
         if (action.op !== 'message' && !task) throw new Error('Unknown task')
