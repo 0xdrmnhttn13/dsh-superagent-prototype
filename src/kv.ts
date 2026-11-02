@@ -2,10 +2,10 @@
  * Typed key-value store keys and key families grouped by the single component that owns and writes each family.
  * Readers and writers refer to a record by its entry here so each key is spelled once with its value type.
  */
-import type { PromptVersion } from './app/prompts.ts'
+interface PromptVersion { revision: number; previousRevision: number | null; savedAt: string; source: string; config: Record<string, unknown>; [key: string]: unknown }
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
-import type { Retry } from './sources/github.ts'
+interface Retry { since: string; pr: boolean; failedAt?: string; attempts?: number }
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }

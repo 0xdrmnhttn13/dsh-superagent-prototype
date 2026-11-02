@@ -1,10 +1,11 @@
 /** SourceKind plugin contract: configuration schema, UI form fields, policy integration, channel adapter, and thread context reader. */
-import type { Agent } from '@deepseek-ai/dsh-agent'
+type Agent = unknown
 import type { z } from 'zod'
 import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
-import type { Deployment } from '../deployment.ts'
+type Deployment = Record<string, unknown> & { stateDir: string; repository?: string; feishu?: unknown }
 import type { Commands } from '../infra/commands.ts'
-import type { SourceContext, SourceHost } from './host.ts'
+interface SourceHost { [key: string]: unknown }
+interface SourceContext { commands: Commands }
 
 export interface Localized { zh: string; en: string }
 /** `advanced` folds a rarely changed field (such as a polling tunable) behind the card's Advanced section. */

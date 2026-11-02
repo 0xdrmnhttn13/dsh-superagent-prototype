@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment } from '../deployment.ts'
+type Deployment = { stateDir: string; repository: string; github: { cli: string }; feishu?: { cli: string } }
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
