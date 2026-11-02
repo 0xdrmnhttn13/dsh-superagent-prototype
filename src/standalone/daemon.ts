@@ -4,7 +4,6 @@ import { homedir } from 'node:os'
 import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, closeSync } from 'node:fs'
 
 const stateDir = resolve(process.argv[2] ?? `${homedir()}/.superagent`)
-const runtime = new LocalRuntime({ stateDir })
 const pidFile = resolve(stateDir, 'sa.pid')
 if (existsSync(pidFile)) {
   const pid = Number(readFileSync(pidFile, 'utf8'))
@@ -13,6 +12,7 @@ if (existsSync(pidFile)) {
   }
   unlinkSync(pidFile)
 }
+const runtime = new LocalRuntime({ stateDir })
 let stopping = false
 const stop = async () => {
   if (stopping) return
@@ -24,9 +24,10 @@ try {
   const fd = openSync(pidFile, 'wx', 0o600)
   writeFileSync(fd, String(process.pid)); closeSync(fd)
   console.log(`Superagent listening at ${stateDir}`)
-  process.on('SIGTERM', () => { void stop().then(() => process.exit(0)) })
-  process.on('SIGINT', () => { void stop().then(() => process.exit(0)) })
+  process.on('SIGTERM', () => { void stop().then(() => process.exit(0), error => { console.error(error); process.exit(1) }) })
+  process.on('SIGINT', () => { void stop().then(() => process.exit(0), error => { console.error(error); process.exit(1) }) })
 } catch (error) {
   console.error(error)
+  if (existsSync(pidFile) && readFileSync(pidFile, 'utf8') === String(process.pid)) unlinkSync(pidFile)
   process.exitCode = 1
 }

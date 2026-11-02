@@ -1,6 +1,7 @@
 import { join } from 'node:path'
 import { Engine, type Candidate, type Trigger } from '../core/index.ts'
 import { Store } from '../app/store.ts'
+import { KV } from '../kv.ts'
 import { settingsPolicy, type Settings } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { localKind } from '../sources/local.ts'
@@ -22,14 +23,19 @@ export class LocalRuntime {
     if (!this.store.get('standalone:initialized')) {
       const current = this.store.settings()
       const actor = localActor()
-      const existing = current.policy.sources.local?.allowed ?? []
-      const settings: Settings = { ...current,
-        policy: { ...current.policy, sources: { ...current.policy.sources, local: { ...current.policy.sources.local,
-          admission: current.policy.sources.local?.admission ?? {}, allowed: options.allowActor === false ? existing : [...existing, ...existing.some(item => item.id === actor) ? [] : [{ id: actor }]] } } },
-        sources: { ...current.sources, local: { enabled: true, config: { acceptPrompts: true, allowEvidenceRead: options.evidence !== false } } },
+      // Never silently broaden a pre-existing Policy or override a disabled Source.
+      const configured = this.store.get(KV.settings.revision) !== undefined
+      if (configured) {
+        this.store.set('standalone:initialized', true)
+      } else {
+        const settings: Settings = { ...current,
+          policy: { ...current.policy, sources: { ...current.policy.sources, local: { admission: {}, allowed: options.allowActor === false ? [] : [{ id: actor }] } } },
+          sources: { ...current.sources, local: { enabled: true,
+            config: { acceptPrompts: true, allowEvidenceRead: options.evidence !== false } } },
+        }
+        this.store.saveSettings(settings)
+        this.store.set('standalone:initialized', true)
       }
-      this.store.saveSettings(settings)
-      this.store.set('standalone:initialized', true)
     }
     this.sources = new SourceRegistry(() => this.store.settings())
     this.sources.register(localKind)
@@ -49,16 +55,16 @@ export class LocalRuntime {
       allowedActor: actor => actor === localActor() && this.store.settings().policy.sources.local?.allowed.some(item => item.id === actor) === true }
   }
   private admit(candidate: Candidate): void {
-    for (const trigger of candidate.triggers) {
-      const policy = settingsPolicy(this.store.settings(), this.sources)
-      const gate = policy.gate(trigger, candidate.thread, candidate.tickets)
-      const outcome = trigger.source === 'local' && trigger.human && gate.admissible && gate.strength === 'explicit'
-        && trigger.actor.id === localActor() && trigger.meta.investigationId === candidate.thread.ref.id
-        ? { kind: 'accept' as const, title: trigger.text.slice(0, 160), scope: 'Read-only local investigation', reason: 'Authorized explicit local request' }
-        : { kind: 'ignore' as const, reason: 'Local investigation not authorized' }
-      try { this.engine.decide(trigger.id, { ...outcome, evalId: candidate.evalId }) } catch (error) { console.error('Admission failed:', error) }
-      break // one Decision per Eval, never one Ticket per trigger in the batch
-    }
+    const trigger = candidate.triggers.find(item => item.id === candidate.thread.evaluating?.primary) ?? candidate.triggers[0]
+    if (!trigger) return
+    const policy = settingsPolicy(this.store.settings(), this.sources)
+    const gate = policy.gate(trigger, candidate.thread, candidate.tickets)
+    const outcome = trigger.source === 'local' && trigger.human && gate.admissible && gate.strength === 'explicit'
+      && trigger.actor.id === localActor() && trigger.meta.investigationId === candidate.thread.ref.id
+      && this.store.settings().policy.sources.local?.allowed.some(item => item.id === trigger.actor.id)
+      ? { kind: 'accept' as const, title: trigger.text.slice(0, 160), scope: 'Read-only local investigation', reason: 'Authorized explicit local request' }
+      : { kind: 'ignore' as const, reason: 'Local investigation not authorized' }
+    try { this.engine.decide(trigger.id, { ...outcome, evalId: candidate.evalId }) } catch (error) { console.error('Admission failed:', error) }
   }
   async start(): Promise<void> {
     try {

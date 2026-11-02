@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { LocalRuntime } from '../src/standalone/runtime.ts'
 import { processLocalRequest, localActor } from '../src/sources/local-ingress.ts'
-import { ticketEvidence } from '../src/standalone/evidence.ts'
+import { ticketEvidence, validateFindings } from '../src/standalone/evidence.ts'
+import { piSessions } from '../src/standalone/pi.ts'
+import { Store } from '../src/app/store.ts'
 import type { SessionFactory } from '../src/standalone/pi.ts'
 
 const directories: string[] = []
@@ -94,6 +96,62 @@ describe('standalone Pi integration (deterministic fake session, real Engine/SQL
     writeFileSync(join(dir, 'local-evidence', digest), 'tampered')
     expect(() => ticketEvidence(enabled.store, dir, ticket.id, String(result.triggerId), digest)).toThrow()
     await enabled.shutdown()
+  })
+
+  it('rejects invalid or cross-ticket findings and disables reads after evidence is turned off', async () => {
+    const dir = directory(), pi = fake(), runtime = new LocalRuntime({ stateDir: dir, sessionFactory: pi.factory })
+    await runtime.start()
+    const first = await processLocalRequest(runtime.host, request('findings', 'first', ['synthetic']))
+    await delay()
+    const ticket = runtime.store.tickets.list()[0]!
+    const digest = createHash('sha256').update('synthetic').digest('hex')
+    expect(() => validateFindings(runtime.store, dir, ticket, { ...findings(digest), extra: true })).toThrow()
+    expect(() => validateFindings(runtime.store, dir, ticket, findings('f'.repeat(64)))).toThrow()
+    expect(() => validateFindings(runtime.store, dir, ticket, findings(digest))).not.toThrow()
+    const current = runtime.store.settings()
+    runtime.store.saveSettings({ ...current, sources: { ...current.sources, local: {
+      enabled: true, config: { acceptPrompts: true, allowEvidenceRead: false },
+    } } })
+    expect(() => ticketEvidence(runtime.store, dir, ticket.id, String(first.triggerId), digest)).toThrow('Evidence reading disabled')
+    expect(() => validateFindings(runtime.store, dir, ticket, findings(digest))).toThrow('Evidence reading disabled')
+    await runtime.shutdown()
+  })
+
+  it('rejects missing, escaped and symlinked Pi session mappings before loading a session', async () => {
+    const dir = directory(), store = new Store(join(dir, 'orchestrator.sqlite'))
+    const session = piSessions(dir, store)
+    const mapping = 'pi-session:ticket'
+    for (const mapped of [join(dir, 'pi-sessions', 'missing.jsonl'), join(dir, 'outside.jsonl')]) {
+      store.set(mapping, mapped)
+      await expect(session('ticket', [])).rejects.toThrow('Unsafe or missing Pi session mapping')
+    }
+    const target = join(dir, 'outside.jsonl')
+    writeFileSync(target, '{}\n')
+    const link = join(dir, 'pi-sessions', 'link.jsonl')
+    symlinkSync(target, link)
+    store.set(mapping, link)
+    await expect(session('ticket', [])).rejects.toThrow('Unsafe or missing Pi session mapping')
+    store.close()
+  })
+
+  it('does not replay an interrupted turn or spin on undelivered inputs; explicit retry creates a new assignment', async () => {
+    const dir = directory(), hanging = fake({ wait: true }), runtime = new LocalRuntime({ stateDir: dir, sessionFactory: hanging.factory })
+    await runtime.start()
+    await processLocalRequest(runtime.host, request('interrupted', 'first'))
+    await delay()
+    const ticket = runtime.store.tickets.list()[0]!
+    expect(hanging.turns).toHaveLength(1)
+    await runtime.shutdown()
+    const pi = fake(), restored = new LocalRuntime({ stateDir: dir, sessionFactory: pi.factory })
+    await restored.start()
+    await delay()
+    expect(restored.store.tickets.get(ticket.id)?.assignments[0]?.report?.state).toBe('failed')
+    expect(pi.turns).toHaveLength(0)
+    restored.engine.retryTicket(ticket.id)
+    await delay()
+    expect(pi.turns).toHaveLength(1)
+    expect(restored.store.tickets.get(ticket.id)?.assignments).toHaveLength(2)
+    await restored.shutdown()
   })
 
   it('records a failed Pi turn without damaging Ticket state; cancellation retains a durable recovery marker', async () => {

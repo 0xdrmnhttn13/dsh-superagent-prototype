@@ -6,7 +6,6 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Store, SCHEMA_VERSION } from '../src/app/store.ts'
 import { MemoryRepositories, key, type Assignment, type Decision, type Repositories, type Thread, type Ticket } from '../src/core/index.ts'
-import { threadFacts } from '../src/app/views/records.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema } from '../src/policy.ts'
 
@@ -116,8 +115,8 @@ it('links a Thread to the page its Source named, or else to the message that sta
   thread('github:7', 'github', '7', { url: 'https://github.com/acme/widgets/pull/7' })
   thread('feishu:oc_1:om_1', 'feishu', 'oc_1:om_1')
   store.triggers.save({ id: 'f1', source: 'feishu', threads: [{ source: 'feishu', id: 'oc_1:om_1' }], actor: { source: 'feishu', id: 'ou_a' }, human: true, at: '1', text: 'hi', url: 'https://applink.feishu.cn/client/message/link/open?token=t', meta: {} })
-  expect(threadFacts(store, store.threads.get('github:7')!).url).toBe('https://github.com/acme/widgets/pull/7')
-  expect(threadFacts(store, store.threads.get('feishu:oc_1:om_1')!).url).toBe('https://applink.feishu.cn/client/message/link/open?token=t')
+  expect(store.threads.get('github:7')!.meta.url).toBe('https://github.com/acme/widgets/pull/7')
+  expect(store.read.firstTrigger('feishu:oc_1:om_1')?.url).toBe('https://applink.feishu.cn/client/message/link/open?token=t')
   store.close()
 })
 

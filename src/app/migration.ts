@@ -9,7 +9,9 @@ import { isoTime, said, type AcceptMode, type AdmissionCell, type ChannelRef, ty
 const feishuChatLink = (brand: 'feishu' | 'lark', chatId: string): string => `https://${brand}.cn/client/chat/${encodeURIComponent(chatId)}`
 const POLL_HORIZON_MS = 14 * 24 * 3600_000
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../policy.ts'
-import { autoMergeThreshold, teamDefaults } from './context.ts'
+// Schema-10 prompt history remains data, not executable instructions for standalone Pi.
+const autoMergeThreshold = (lines: number): string => `it changes fewer than ${lines} lines (additions plus deletions);`
+const teamDefaults = { communication: '', scope: '', delivery: '' }
 import { z as schema } from 'zod'
 const PromptConfigSchema = schema.object({ communication: schema.string(), scope: schema.string(), delivery: schema.string(), skills: schema.record(schema.string(), schema.string()).default({}) }).passthrough()
 type PromptConfig = z.infer<typeof PromptConfigSchema>
