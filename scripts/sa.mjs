@@ -36,6 +36,7 @@ if (cmd === 'stop') {
 }
 let input
 if (cmd === 'status') input = { kind: 'status' }
+else if (cmd === 'tickets') input = { kind: 'list_tickets' }
 else if (cmd === 'show') {
   const investigationId = option('--id')
   if (!investigationId) { console.error('show needs --id'); process.exit(2) }
@@ -51,7 +52,7 @@ else if (cmd === 'show') {
     ? [{ label: evidenceFile.split('/').at(-1), base64: readFileSync(evidenceFile).toString('base64') }]
     : []
   input = { kind: 'submit', eventId, investigationId, text, evidence }
-} else { console.error('Usage: sa start|status|investigate|followup|show|stop [--state-dir DIR] [--prompt TEXT] [--id ID] [--event-id ID] [--evidence FILE]'); process.exit(2) }
+} else { console.error('Usage: sa start|status|tickets|investigate|followup|show|stop [--state-dir DIR] [--prompt TEXT] [--id ID] [--event-id ID] [--evidence FILE]'); process.exit(2) }
 const socket = connect(join(stateDir, 'local.sock'))
 socket.setTimeout(10_000, () => { console.error('Socket timeout'); socket.destroy(); process.exitCode = 1 })
 const chunks = []

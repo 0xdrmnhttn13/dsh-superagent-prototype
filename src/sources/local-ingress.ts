@@ -26,6 +26,8 @@ const Submit = z.object({
 }).strict()
 const Show = z.object({ kind: z.literal('show'), investigationId: ID }).strict()
 const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.literal('status') }).strict(),
+  z.object({ kind: z.literal('list_tickets') }).strict(),
+  z.object({ kind: z.literal('inspect_ticket'), ticketId: ID }).strict(),
   z.object({ kind: z.literal('board'), ticketId: ID }).strict(),
   z.object({ kind: z.literal('board_action'), action: BoardAction }).strict(),
   z.object({ kind: z.literal('approve_agent'), ticketId: ID, agent: AgentConfig.omit({ tickets: true }), token: z.string().optional() }).strict(),
@@ -42,7 +44,7 @@ export interface IngressHost {
     config(kind: string): { acceptPrompts: boolean } | undefined
     receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
     threads?: { get(key: string): { subscriptions: string[] } | undefined }
-    tickets?: { get(id: string): Ticket | undefined }
+    tickets?: { get(id: string): Ticket | undefined; list?(): Ticket[] }
     triggers: { get(id: string): Trigger | undefined; latest?(thread: string): Trigger | undefined }
   }
   allowedActor(actor: string): boolean
@@ -142,6 +144,20 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
   const allowed = host.allowedActor(actor)
   if (request.kind === 'status') return { ok: true, actor, enabled, allowed }
   if (!enabled || !allowed) return { ok: false, error: !enabled ? 'local_intake_disabled' : 'local_actor_not_allowlisted', actor }
+  const owned = (ticket: Ticket): boolean => ticket.mandate.actor.source === LOCAL_SOURCE && ticket.mandate.actor.id === actor
+    && host.source.triggers.get(ticket.origin.triggerId)?.source === LOCAL_SOURCE
+    && host.source.triggers.get(ticket.origin.triggerId)?.actor.id === actor
+  if (request.kind === 'list_tickets') return { ok: true, tickets: (host.source.tickets?.list?.() ?? []).filter(owned)
+    .slice(0, 100).map(ticket => ({ ticketId: ticket.id, title: ticket.title, investigationId:
+      host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId, ended: ticket.ended ?? null,
+      latestReport: latestReport(ticket)?.state ?? null })) }
+  if (request.kind === 'inspect_ticket') {
+    const ticket = host.source.tickets?.get(request.ticketId)
+    if (!ticket || !owned(ticket)) return { ok: false, error: 'unknown_ticket' }
+    return { ok: true, ticketId: ticket.id, title: ticket.title, investigationId:
+      host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId, ended: ticket.ended ?? null,
+      latestReport: latestReport(ticket)?.state ?? null }
+  }
   if (request.kind === 'board') return { ok: true, board: host.collaboration?.board(request.ticketId) }
   if (request.kind === 'board_action') return { ok: true, board: host.collaboration?.act(actor, request.action) }
   if (request.kind === 'approve_agent') {

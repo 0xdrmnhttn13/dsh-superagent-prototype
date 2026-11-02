@@ -68,7 +68,7 @@ export class LocalRuntime {
       },
       source: { config: kind => kind === 'local' ? this.sources.instance<{ acceptPrompts: boolean }>('local')?.config : undefined,
         receive: (trigger: Trigger) => { const result = this.engine.receive(trigger); this.engine.evaluateDue(); return result },
-        threads: { get: key => this.store.threads.get(key) }, tickets: { get: id => this.store.tickets.get(id) },
+        threads: { get: key => this.store.threads.get(key) }, tickets: { get: id => this.store.tickets.get(id), list: () => this.store.tickets.list() },
         triggers: { get: id => this.store.triggers.get(id) } },
       allowedActor: actor => actor === localActor() && this.store.settings().policy.sources.local?.allowed.some(item => item.id === actor) === true }
   }

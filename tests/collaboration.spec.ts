@@ -25,6 +25,35 @@ const make = async () => {
 }
 
 describe('ticket-scoped collaboration', () => {
+  it('lists and inspects owner Tickets across Pi sessions without exposing foreign or missing Tickets', async () => {
+    const { runtime, ticket } = await make()
+    const second = await processLocalRequest(runtime.host, submit('another-pi-session', 'event-2'))
+    expect(second.ok).toBe(true)
+    const list = await processLocalRequest(runtime.host, { kind: 'list_tickets' })
+    expect(list.ok).toBe(true)
+    expect(list.tickets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ ticketId: ticket.id, investigationId: 'approved' }),
+      expect.objectContaining({ investigationId: 'another-pi-session' }),
+    ]))
+    expect(await processLocalRequest(runtime.host, { kind: 'inspect_ticket', ticketId: ticket.id }))
+      .toMatchObject({ ok: true, investigationId: 'approved', ticketId: ticket.id })
+    expect(await processLocalRequest(runtime.host, { kind: 'inspect_ticket', ticketId: 'missing' }))
+      .toMatchObject({ ok: false, error: 'unknown_ticket' })
+    await runtime.shutdown()
+    const restored = new LocalRuntime({ stateDir: dirs[0]!, sessionFactory: fake })
+    await restored.start()
+    expect((await processLocalRequest(restored.host, { kind: 'list_tickets' })).tickets).toHaveLength(2)
+    await restored.shutdown()
+  })
+  it('does not list Tickets if local intake or Policy is disabled', async () => {
+    const { runtime } = await make()
+    const settings = runtime.store.settings()
+    runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: { ...settings.policy.sources,
+      local: { admission: {}, allowed: [] },
+    } } })
+    expect(await processLocalRequest(runtime.host, { kind: 'list_tickets' })).toMatchObject({ ok: false, error: 'local_actor_not_allowlisted' })
+    await runtime.shutdown()
+  })
   it('rejects local/metadata IP destinations and accepts only public IPv4 literals', async () => {
     for (const host of ['127.0.0.1', '10.2.3.4', '169.254.169.254', '192.168.1.2', '172.16.0.1', '::1', '2001:4860:4860::8888', '192.0.2.1'])
       await expect(publicEndpoint(host)).rejects.toThrow('non-public')

@@ -6,16 +6,22 @@ import { requestLocal, readBoard } from './client.ts'
 const ID = /^[a-zA-Z0-9_-]{1,100}$/
 const dir = () => process.env.SA_STATE_DIR || `${homedir()}/.superagent`
 const ticketBinding = (sessionId: string) => `pi-${sessionId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 90)}`
-const ticketIds = (response: Record<string, unknown>): string[] => {
-  const tickets = response.tickets
-  return Array.isArray(tickets) ? tickets.flatMap(item => item && typeof item === 'object' && typeof item.ticketId === 'string' ? [item.ticketId] : []) : []
+const ownedTicket = async (ticketId: string) => {
+  if (!ID.test(ticketId)) throw new Error('Invalid Ticket ID')
+  return requestLocal(dir(), { kind: 'inspect_ticket', ticketId })
 }
 const ensureStatus = async () => {
   const status = await requestLocal(dir(), { kind: 'status' })
   if (status.enabled !== true || status.allowed !== true) throw new Error('Local intake or owner Policy disabled')
 }
 async function run(ctx: ExtensionCommandContext, action: () => Promise<void>) {
-  try { await ensureStatus(); await action() } catch (error) { ctx.ui.notify(`Superagent: ${error instanceof Error ? error.message : String(error)}. Start daemon with node scripts/sa.mjs start`, 'error') }
+  try { await ensureStatus(); await action() }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    ctx.ui.notify(message.includes('ENOENT') || message.includes('ECONNREFUSED')
+      ? `Superagent daemon unavailable at ${dir()}; start it with node scripts/sa.mjs start --state-dir ${dir()}`
+      : `Superagent (${dir()}): ${message}`, 'error')
+  }
 }
 
 /** Explicit commands only: an ordinary Pi prompt never creates a Ticket. */
@@ -42,8 +48,7 @@ export default function superagent(pi: ExtensionAPI) {
     const ticketId = args.trim()
     if (!ID.test(ticketId) || !ctx.hasUI) throw new Error('Usage: /collaborate <ticket-id> (interactive Pi only)')
     const session = ticketBinding(ctx.sessionManager.getSessionId())
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: session })
-    if (!ticketIds(shown).includes(ticketId)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId)
     if (!await ctx.ui.confirm('Resume supervised collaboration?', `Ticket ${ticketId}: up to 4 agent turns, only while this Pi session stays open. Agent proposals stop for approval. Provider calls may cost money.`)) return
     await pause(ctx)
     await requestLocal(dir(), { kind: 'collaboration', ticketId, session, op: 'resume' })
@@ -77,8 +82,7 @@ export default function superagent(pi: ExtensionAPI) {
   pi.registerCommand('proposal', { description: 'Review an agent proposal: /proposal <ticket-id> <proposal-id>', handler: async (args, ctx) => run(ctx, async () => {
     const [ticketId, proposalId] = args.trim().split(/\s+/)
     if (!ID.test(ticketId ?? '') || !ID.test(proposalId ?? '') || !ctx.hasUI) throw new Error('Usage: /proposal <ticket-id> <proposal-id>')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     const board = readBoard(await requestLocal(dir(), { kind: 'board', ticketId: ticketId! }))
     const proposal = board.proposals.find(item => item.id === proposalId && item.state === 'pending')
     if (!proposal) throw new Error('No pending proposal')
@@ -99,17 +103,15 @@ export default function superagent(pi: ExtensionAPI) {
       ctx.ui.notify(`Ticket submitted: ${investigationId}; /tickets to see status (${result.status})`, 'info')
     })
   } })
-  pi.registerCommand('tickets', { description: 'Show approved Tickets for this Pi session', handler: async (_args, ctx) => run(ctx, async () => {
-    const investigationId = ticketBinding(ctx.sessionManager.getSessionId())
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId })
+  pi.registerCommand('tickets', { description: 'List local Tickets across Pi sessions in this state directory', handler: async (_args, ctx) => run(ctx, async () => {
+    const shown = await requestLocal(dir(), { kind: 'list_tickets' })
     const summary = Array.isArray(shown.tickets) ? shown.tickets.map(value => JSON.stringify(value)).join('\n') : ''
-    ctx.ui.notify(summary.slice(0, 8000) || 'No Tickets', 'info')
+    ctx.ui.notify(summary.slice(0, 8000) || `No local Tickets in ${dir()}; check SA_STATE_DIR used when creating the Ticket`, 'info')
   }) })
   pi.registerCommand('task', { description: 'Create an owner-approved task: /task <ticket-id> <description>', handler: async (args, ctx) => run(ctx, async () => {
     const [ticketId, ...words] = args.trim().split(/\s+/)
     if (!ID.test(ticketId ?? '') || !words.length || !ctx.hasUI) throw new Error('Usage: /task <ticket-id> <description> (interactive Pi only)')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     const title = words.join(' ')
     if (!await ctx.ui.confirm('Add task to Ticket?', `${ticketId}\n${title}`)) return
     const result = await requestLocal(dir(), { kind: 'board_action', action: { op: 'task', ticketId: ticketId!, title } })
@@ -118,15 +120,13 @@ export default function superagent(pi: ExtensionAPI) {
   pi.registerCommand('board', { description: 'Show task and discussion board: /board <ticket-id>', handler: async (args, ctx) => run(ctx, async () => {
     const ticketId = args.trim()
     if (!ID.test(ticketId)) throw new Error('Usage: /board <ticket-id>')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId)
     ctx.ui.notify(JSON.stringify(readBoard(await requestLocal(dir(), { kind: 'board', ticketId }))).slice(0, 8000), 'info')
   }) })
   pi.registerCommand('approve-agent', { description: 'Approve local subagent: /approve-agent <ticket-id> <agent-id>', handler: async (args, ctx) => run(ctx, async () => {
     const [ticketId, agentId] = args.trim().split(/\s+/)
     if (!ID.test(ticketId ?? '') || !ID.test(agentId ?? '') || !ctx.hasUI) throw new Error('Usage: /approve-agent <ticket-id> <agent-id> (interactive Pi only)')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     if (!await ctx.ui.confirm('Approve local subagent for this Ticket?', `${agentId} may claim tasks and post discussion on ${ticketId}. No file/shell/network tools.`)) return
     await requestLocal(dir(), { kind: 'approve_agent', ticketId: ticketId!, agent: { id: agentId!, kind: 'local' } })
     ctx.ui.notify(`Approved ${agentId} on ${ticketId}`, 'info')
@@ -136,8 +136,7 @@ export default function superagent(pi: ExtensionAPI) {
     if (!ID.test(ticketId ?? '') || !ID.test(agentId ?? '') || !/^https:\/\/[^\s]+$/.test(endpoint ?? '')
       || !/^[A-Z][A-Z0-9_]*$/.test(tokenEnv ?? '') || !ctx.hasUI)
       throw new Error('Usage: /approve-external <ticket-id> <agent-id> <https-url> <TOKEN_ENV> (interactive Pi only)')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     const token = process.env[tokenEnv!]
     if (!token || token.length < 32) throw new Error('Set a token of at least 32 characters in the daemon and Pi environments')
     if (!await ctx.ui.confirm('Approve outbound external agent?', `${agentId} at ${endpoint} receives Ticket context and discussion over HTTPS. Token env: ${tokenEnv}; no secrets shown.`)) return
@@ -148,8 +147,7 @@ export default function superagent(pi: ExtensionAPI) {
     const [ticketId, taskId, agentId] = args.trim().split(/\s+/)
     if (![ticketId, taskId, agentId].every(value => ID.test(value ?? '')) || !ctx.hasUI)
       throw new Error('Usage: /claim-task <ticket-id> <task-id> <agent-id> (interactive Pi only)')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     if (!await ctx.ui.confirm('Assign task to agent?', `${taskId} on ${ticketId} → ${agentId}`)) return
     const result = await requestLocal(dir(), { kind: 'claim_agent', ticketId: ticketId!, taskId: taskId!, agentId: agentId! })
     ctx.ui.notify(JSON.stringify(readBoard(result)).slice(0, 8000), 'info')
@@ -160,8 +158,7 @@ export default function superagent(pi: ExtensionAPI) {
   pi.registerCommand('discuss', { description: 'Post an owner message: /discuss <ticket-id> <message>', handler: async (args, ctx) => run(ctx, async () => {
     const [ticketId, ...words] = args.trim().split(/\s+/)
     if (!ID.test(ticketId ?? '') || !words.length || !ctx.hasUI) throw new Error('Usage: /discuss <ticket-id> <message> (interactive Pi only)')
-    const shown = await requestLocal(dir(), { kind: 'show', investigationId: ticketBinding(ctx.sessionManager.getSessionId()) })
-    if (!ticketIds(shown).includes(ticketId!)) throw new Error('Ticket not bound to this Pi session')
+    await ownedTicket(ticketId!)
     const text = words.join(' ')
     if (!await ctx.ui.confirm('Post to Ticket discussion?', `${ticketId}\n${text}`)) return
     await requestLocal(dir(), { kind: 'board_action', action: { op: 'message', ticketId: ticketId!, text } })

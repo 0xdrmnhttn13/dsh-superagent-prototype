@@ -6,6 +6,8 @@ import { BoardAction, AgentConfig, Board } from './collaboration.ts'
 const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
 export const ClientRequest = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('status') }).strict(),
+  z.object({ kind: z.literal('list_tickets') }).strict(),
+  z.object({ kind: z.literal('inspect_ticket'), ticketId: ID }).strict(),
   z.object({ kind: z.literal('submit'), investigationId: ID, eventId: ID, text: z.string().min(1).max(16_384), evidence: z.array(z.never()).default([]) }).strict(),
   z.object({ kind: z.literal('show'), investigationId: ID }).strict(),
   z.object({ kind: z.literal('board'), ticketId: ID }).strict(),
