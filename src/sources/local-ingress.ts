@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { key, latestReport, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { localTrigger, LOCAL_SOURCE } from './local-trigger.ts'
+import { BoardAction, AgentConfig, type Board, type Registry } from '../standalone/collaboration.ts'
 
 const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
 const MAX_EVIDENCE = 64 * 1024
@@ -24,7 +25,14 @@ const Submit = z.object({
   evidence: z.array(EvidenceUpload).max(4).default([]),
 }).strict()
 const Show = z.object({ kind: z.literal('show'), investigationId: ID }).strict()
-const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.literal('status') }).strict()])
+const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.literal('status') }).strict(),
+  z.object({ kind: z.literal('board'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('board_action'), action: BoardAction }).strict(),
+  z.object({ kind: z.literal('approve_agent'), ticketId: ID, agent: AgentConfig.omit({ tickets: true }), token: z.string().optional() }).strict(),
+  z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
+  z.object({ kind: z.literal('run_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
+  z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
+])
 export type LocalRequest = z.input<typeof Request>
 
 export interface IngressHost {
@@ -37,6 +45,15 @@ export interface IngressHost {
     triggers: { get(id: string): Trigger | undefined; latest?(thread: string): Trigger | undefined }
   }
   allowedActor(actor: string): boolean
+  collaboration?: {
+    board(ticketId: string): Board
+    act(actorId: string, action: z.infer<typeof BoardAction>, token?: string): Board
+    approve(ticketId: string, agent: z.infer<typeof AgentConfig>, token?: string): void
+    revoke(ticketId: string, agentId: string): void
+    registry(): Registry
+    run?(ticketId: string, taskId: string, agentId: string): Promise<Board>
+    claim?(ticketId: string, taskId: string, agentId: string): Board
+  }
 }
 
 /** Actor identity is derived from the daemon's OS uid, never from request JSON. */
@@ -117,6 +134,21 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
   const allowed = host.allowedActor(actor)
   if (request.kind === 'status') return { ok: true, actor, enabled, allowed }
   if (!enabled || !allowed) return { ok: false, error: !enabled ? 'local_intake_disabled' : 'local_actor_not_allowlisted', actor }
+  if (request.kind === 'board') return { ok: true, board: host.collaboration?.board(request.ticketId) }
+  if (request.kind === 'board_action') return { ok: true, board: host.collaboration?.act(actor, request.action) }
+  if (request.kind === 'approve_agent') {
+    host.collaboration?.approve(request.ticketId, { ...request.agent, tickets: [] }, request.token)
+    return { ok: true }
+  }
+  if (request.kind === 'revoke_agent') { host.collaboration?.revoke(request.ticketId, request.agentId); return { ok: true } }
+  if (request.kind === 'claim_agent') {
+    if (!host.collaboration?.claim) return { ok: false, error: 'agent_claim_unavailable' }
+    return { ok: true, board: host.collaboration.claim(request.ticketId, request.taskId, request.agentId) }
+  }
+  if (request.kind === 'run_agent') {
+    if (!host.collaboration?.run) return { ok: false, error: 'agent_execution_unavailable' }
+    return { ok: true, board: await host.collaboration.run(request.ticketId, request.taskId, request.agentId) }
+  }
   if (request.kind === 'show') {
     const thread = host.source.threads?.get(`local:${request.investigationId}`)
     const tickets = (thread?.subscriptions ?? []).flatMap(id => host.source.tickets?.get(id) ?? [])
