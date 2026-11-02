@@ -30,8 +30,9 @@ const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.l
   z.object({ kind: z.literal('board_action'), action: BoardAction }).strict(),
   z.object({ kind: z.literal('approve_agent'), ticketId: ID, agent: AgentConfig.omit({ tickets: true }), token: z.string().optional() }).strict(),
   z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
-  z.object({ kind: z.literal('run_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
+  z.object({ kind: z.literal('resolve_proposal'), ticketId: ID, proposalId: ID, approve: z.boolean() }).strict(),
+  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'step']) }).strict(),
 ])
 export type LocalRequest = z.input<typeof Request>
 
@@ -51,8 +52,15 @@ export interface IngressHost {
     approve(ticketId: string, agent: z.infer<typeof AgentConfig>, token?: string): void
     revoke(ticketId: string, agentId: string): void
     registry(): Registry
-    run?(ticketId: string, taskId: string, agentId: string): Promise<Board>
     claim?(ticketId: string, taskId: string, agentId: string): Board
+    resolve?(ticketId: string, proposalId: string, approve: boolean): Board
+    presence?: {
+      view(ticketId: string): { active: boolean; remaining: number; paused: boolean }
+      resume(ticketId: string, session: string, maxTurns?: number): void
+      heartbeat(ticketId: string, session: string): void
+      pause(ticketId: string, session: string): void
+      step(ticketId: string, session: string): Promise<Board>
+    }
   }
 }
 
@@ -141,13 +149,22 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
     return { ok: true }
   }
   if (request.kind === 'revoke_agent') { host.collaboration?.revoke(request.ticketId, request.agentId); return { ok: true } }
+  if (request.kind === 'resolve_proposal') {
+    if (!host.collaboration?.resolve) return { ok: false, error: 'proposal_unavailable' }
+    return { ok: true, board: host.collaboration.resolve(request.ticketId, request.proposalId, request.approve) }
+  }
+  if (request.kind === 'collaboration') {
+    const presence = host.collaboration?.presence
+    if (!presence) return { ok: false, error: 'collaboration_unavailable' }
+    if (request.op === 'resume') presence.resume(request.ticketId, request.session)
+    else if (request.op === 'heartbeat') presence.heartbeat(request.ticketId, request.session)
+    else if (request.op === 'pause') presence.pause(request.ticketId, request.session)
+    else return { ok: true, board: await presence.step(request.ticketId, request.session), presence: presence.view(request.ticketId) }
+    return { ok: true, presence: presence.view(request.ticketId) }
+  }
   if (request.kind === 'claim_agent') {
     if (!host.collaboration?.claim) return { ok: false, error: 'agent_claim_unavailable' }
     return { ok: true, board: host.collaboration.claim(request.ticketId, request.taskId, request.agentId) }
-  }
-  if (request.kind === 'run_agent') {
-    if (!host.collaboration?.run) return { ok: false, error: 'agent_execution_unavailable' }
-    return { ok: true, board: await host.collaboration.run(request.ticketId, request.taskId, request.agentId) }
   }
   if (request.kind === 'show') {
     const thread = host.source.threads?.get(`local:${request.investigationId}`)
@@ -206,7 +223,7 @@ export async function listenLocalIngress(host: IngressHost): Promise<() => Promi
     const chunks: Buffer[] = []
     let bytes = 0
     let tooLarge = false
-    socket.setTimeout(10_000, () => { socket.destroy() })
+    socket.setTimeout(60_000, () => { socket.destroy() })
     socket.on('data', (chunk: Buffer) => {
       bytes += chunk.length
       if (bytes > MAX_WIRE) { tooLarge = true; socket.destroy(); return }

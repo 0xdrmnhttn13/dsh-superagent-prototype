@@ -12,8 +12,9 @@ export const ClientRequest = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('board_action'), action: BoardAction }).strict(),
   z.object({ kind: z.literal('approve_agent'), ticketId: ID, agent: AgentConfig.omit({ tickets: true }), token: z.string().optional() }).strict(),
   z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
-  z.object({ kind: z.literal('run_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
+  z.object({ kind: z.literal('resolve_proposal'), ticketId: ID, proposalId: ID, approve: z.boolean() }).strict(),
+  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'step']) }).strict(),
 ])
 export type ClientRequest = z.input<typeof ClientRequest>
 
@@ -24,7 +25,8 @@ export async function requestLocal(stateDir: string, input: ClientRequest): Prom
     const socket = connect(join(stateDir, 'local.sock'))
     const chunks: Buffer[] = []
     let size = 0
-    socket.setTimeout(10_000, () => socket.destroy(new Error('Superagent socket timeout')))
+    socket.setTimeout(request.kind === 'collaboration' && request.op === 'step' ? 60_000 : 10_000,
+      () => socket.destroy(new Error('Superagent socket timeout')))
     socket.once('connect', () => socket.end(JSON.stringify(request)))
     socket.on('data', chunk => {
       size += chunk.length
