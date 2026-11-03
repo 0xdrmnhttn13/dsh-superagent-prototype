@@ -13,6 +13,21 @@ export class PresenceManager {
   constructor(private readonly store: Store, private readonly collaboration: Collaboration,
     private readonly runner: (ticketId: string, taskId: string, agentId: string, signal: AbortSignal) => Promise<Board>) {}
   private current(ticketId: string): Presence | undefined { return this.store.get<Presence>(key(ticketId)) }
+  /** File approvals cannot change a running model turn's capabilities. */
+  requireIdle(ticketId: string): void {
+    this.collaboration.board(ticketId)
+    if (this.active.get(ticketId)?.running) throw new Error('Agent turn in progress; wait for it to finish before approving files')
+  }
+  authorizeTurn(ticketId: string, taskId: string, agentId: string, signal?: AbortSignal): void {
+    const active = this.active.get(ticketId)
+    if (!active?.running || signal !== active.controller.signal || signal?.aborted || !this.view(ticketId).active)
+      throw new Error('Workspace turn is no longer authorized')
+    const task = this.collaboration.board(ticketId).tasks.find(item => item.id === taskId)
+    if (task?.state !== 'claimed' || task.claimedBy !== agentId) throw new Error('Workspace task is no longer assigned')
+    const scope = this.store.get<{ head: string; paths: string[] }>(`collaboration:code-task:${ticketId}:${taskId}`)
+    if (agentId !== 'coder' || !scope)
+      throw new Error('Workspace edits require a separately approved coder task')
+  }
   view(ticketId: string): { active: boolean; remaining: number; paused: boolean } {
     this.collaboration.board(ticketId)
     const state = this.current(ticketId)
@@ -68,10 +83,15 @@ export class PresenceManager {
     if (active?.running || state.remaining < 1 || board.proposals.some(item => item.state === 'pending')) return board
     const approved = this.collaboration.registry().agents.find(agent => agent.id === 'reviewer' && agent.kind === 'local' && agent.tickets.includes(ticketId))
     if (!approved) throw new Error('Local reviewer not approved for Ticket')
+    const coder = this.collaboration.registry().agents.find(agent => agent.id === 'coder' && agent.kind === 'local' && agent.tickets.includes(ticketId))
     // Do not claim more work while an earlier turn is in progress or failed ambiguously.
     if (board.tasks.some(task => task.state === 'claimed')) return board
     const open = board.tasks.find(task => task.state === 'open')
-    if (open) return this.collaboration.claim(ticketId, open.id, approved.id)
+    if (open) {
+      const coding = this.store.get(`collaboration:code-task:${ticketId}:${open.id}`)
+      if (coding && !coder) throw new Error('Approved coder is unavailable; coding task cannot be assigned to reviewer')
+      return this.collaboration.claim(ticketId, open.id, coding ? coder!.id : approved.id)
+    }
     return board
   }
   async step(ticketId: string, session: string): Promise<Board> {
