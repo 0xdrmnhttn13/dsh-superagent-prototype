@@ -34,7 +34,7 @@ const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.l
   z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('resolve_proposal'), ticketId: ID, proposalId: ID, approve: z.boolean() }).strict(),
-  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'step']) }).strict(),
+  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'prepare', 'step']) }).strict(),
 ])
 export type LocalRequest = z.input<typeof Request>
 
@@ -62,6 +62,7 @@ export interface IngressHost {
       heartbeat(ticketId: string, session: string): void
       pause(ticketId: string, session: string): void
       step(ticketId: string, session: string): Promise<Board>
+      prepare?(ticketId: string, session: string): Board
     }
   }
 }
@@ -175,6 +176,7 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
     if (request.op === 'resume') presence.resume(request.ticketId, request.session)
     else if (request.op === 'heartbeat') presence.heartbeat(request.ticketId, request.session)
     else if (request.op === 'pause') presence.pause(request.ticketId, request.session)
+    else if (request.op === 'prepare') return { ok: true, board: presence.prepare?.(request.ticketId, request.session), presence: presence.view(request.ticketId) }
     else return { ok: true, board: await presence.step(request.ticketId, request.session), presence: presence.view(request.ticketId) }
     return { ok: true, presence: presence.view(request.ticketId) }
   }

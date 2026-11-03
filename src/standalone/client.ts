@@ -16,7 +16,7 @@ export const ClientRequest = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('resolve_proposal'), ticketId: ID, proposalId: ID, approve: z.boolean() }).strict(),
-  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'step']) }).strict(),
+  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'prepare', 'step']) }).strict(),
 ])
 export type ClientRequest = z.input<typeof ClientRequest>
 

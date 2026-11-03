@@ -29,12 +29,79 @@ export default function superagent(pi: ExtensionAPI) {
   let heartbeat: ReturnType<typeof setInterval> | undefined
   let bound: { ticketId: string; session: string } | undefined
   let heartbeatPending = false
+  let loop: Promise<void> | undefined
+  let pendingRestart: { current: { ticketId: string; session: string }; ctx: ExtensionCommandContext } | undefined
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+  const supervise = (current: { ticketId: string; session: string }, ctx: ExtensionCommandContext) => {
+    if (loop) { pendingRestart = { current, ctx }; return }
+    loop = (async () => {
+      let seen = readBoard(await requestLocal(dir(), { kind: 'board', ticketId: current.ticketId })).progress.length
+      while (bound === current) {
+        try {
+          const snapshot = await requestLocal(dir(), { kind: 'collaboration', ...current, op: 'heartbeat' })
+          if (typeof snapshot.presence === 'object' && snapshot.presence !== null && 'remaining' in snapshot.presence
+            && snapshot.presence.remaining === 0) { ctx.ui.setStatus('superagent', 'Superagent: turn budget exhausted'); break }
+          const prepared = readBoard(await requestLocal(dir(), { kind: 'collaboration', ...current, op: 'prepare' }))
+          if (bound !== current) break
+          const pending = prepared.proposals.filter(item => item.state === 'pending')
+          if (pending.length) {
+            ctx.ui.setStatus('superagent', `Superagent: ${pending.length} proposal(s) need approval`)
+            ctx.ui.notify(`Review proposals with /board ${current.ticketId} then /proposal ${current.ticketId} <proposal-id>`, 'warning')
+            break
+          }
+          const ready = prepared.tasks.some(item => item.state === 'claimed' && item.claimedBy === 'reviewer')
+          if (!ready) { ctx.ui.setStatus('superagent', 'Superagent: no tasks ready'); break }
+          const blocked = prepared.tasks.find(item => item.state === 'claimed' && item.claimedBy === 'reviewer')
+          if (blocked && prepared.progress.some(event => event.taskId === blocked.id && (event.kind === 'result' || event.kind === 'failed' || event.kind === 'paused'))) {
+            ctx.ui.setStatus('superagent', 'Superagent: task needs owner review')
+            break
+          }
+          ctx.ui.setStatus('superagent', 'Superagent reviewer: working')
+          ctx.ui.notify('Reviewer working; user-facing checkpoints will appear here.', 'info')
+          const step = requestLocal(dir(), { kind: 'collaboration', ...current, op: 'step' })
+          let settled = false
+          void step.then(() => { settled = true }, () => { settled = true })
+          while (bound === current && !settled) {
+            await delay(600)
+            if (bound !== current) break
+            try {
+              const board = readBoard(await requestLocal(dir(), { kind: 'board', ticketId: current.ticketId }))
+              for (const event of board.progress.slice(seen)) {
+                if (event.kind === 'checkpoint' || event.kind === 'result' || event.kind === 'failed') ctx.ui.notify(`${event.actor}: ${event.explanation}`, 'info')
+              }
+              seen = board.progress.length
+            } catch { /* Poll failures do not hide the actual step result. */ }
+          }
+          await step
+          if (bound === current) {
+            const board = readBoard(await requestLocal(dir(), { kind: 'board', ticketId: current.ticketId }))
+            for (const event of board.progress.slice(seen)) {
+              if (event.kind === 'checkpoint' || event.kind === 'result' || event.kind === 'failed') ctx.ui.notify(`${event.actor}: ${event.explanation}`, 'info')
+            }
+            seen = board.progress.length
+          }
+          if (bound !== current) break
+        } catch (error) {
+          if (bound === current) ctx.ui.notify(`Collaboration stopped: ${error instanceof Error ? error.message : String(error)}`, 'warning')
+          break
+        }
+      }
+    })().catch(error => {
+      if (bound === current) ctx.ui.notify(`Collaboration stopped: ${error instanceof Error ? error.message : String(error)}`, 'warning')
+    }).finally(() => {
+      loop = undefined
+      const next = pendingRestart
+      pendingRestart = undefined
+      if (next && bound === next.current) supervise(next.current, next.ctx)
+    })
+  }
   const pause = async (ctx?: ExtensionContext) => {
     if (heartbeat) clearInterval(heartbeat)
     heartbeat = undefined
     heartbeatPending = false
     const current = bound
     bound = undefined
+    pendingRestart = undefined
     if (current) {
       try { await requestLocal(dir(), { kind: 'collaboration', ...current, op: 'pause' }) } catch { /* lease expires even if daemon is gone */ }
     }
@@ -50,9 +117,19 @@ export default function superagent(pi: ExtensionAPI) {
     const session = ticketBinding(ctx.sessionManager.getSessionId())
     await ownedTicket(ticketId)
     if (!await ctx.ui.confirm('Resume supervised collaboration?', `Ticket ${ticketId}: up to 4 agent turns, only while this Pi session stays open. Agent proposals stop for approval. Provider calls may cost money.`)) return
+    const initial = readBoard(await requestLocal(dir(), { kind: 'board', ticketId }))
+    if (!await ctx.ui.confirm('Approve local reviewer?', `Reviewer can read Ticket context and post progress, discussion and proposals on ${ticketId}. No file, shell, or network tools.`))
+      throw new Error('Local reviewer was not approved; collaboration was not started')
+    if (!initial.tasks.length) {
+      const ticket = await ownedTicket(ticketId)
+      const title = String(ticket.title ?? '').slice(0, 500)
+      if (title) await requestLocal(dir(), { kind: 'board_action', action: { op: 'task', ticketId, title } })
+    }
+    await requestLocal(dir(), { kind: 'approve_agent', ticketId, agent: { id: 'reviewer', kind: 'local' } })
     await pause(ctx)
     await requestLocal(dir(), { kind: 'collaboration', ticketId, session, op: 'resume' })
-    bound = { ticketId, session }
+    const current = { ticketId, session }
+    bound = current
     ctx.ui.setStatus('superagent', `Superagent ${ticketId.slice(0, 8)}: active`)
     heartbeat = setInterval(() => {
       const current = bound
@@ -62,13 +139,15 @@ export default function superagent(pi: ExtensionAPI) {
         .catch(() => { if (bound === current) void pause(ctx) })
         .finally(() => { heartbeatPending = false })
     }, 2000)
-    ctx.ui.notify('Collaboration active. /next-agent runs one visible turn; /pause-collaboration stops it.', 'info')
+    ctx.ui.notify('Collaboration active. Ready tasks run automatically; /pause-collaboration stops it.', 'info')
+    supervise(current, ctx)
   }) })
   pi.registerCommand('pause-collaboration', { description: 'Pause all agent work for this Pi session', handler: async (_args, ctx) => {
     await pause(ctx)
     ctx.ui.notify('Collaboration paused', 'info')
   } })
-  pi.registerCommand('next-agent', { description: 'Run one bounded turn while Pi is present: /next-agent <ticket-id>', handler: async (args, ctx) => run(ctx, async () => {
+  pi.registerCommand('next-agent', { description: 'Manual fallback: run one bounded turn while Pi is present', handler: async (args, ctx) => run(ctx, async () => {
+    if (loop) throw new Error('Automatic supervision is active; wait or pause it before manual step')
     const ticketId = args.trim()
     if (!bound || bound.ticketId !== ticketId || !ctx.hasUI) throw new Error('Use /collaborate <ticket-id> first')
     const board = readBoard(await requestLocal(dir(), { kind: 'board', ticketId }))
@@ -89,6 +168,8 @@ export default function superagent(pi: ExtensionAPI) {
     const approve = await ctx.ui.confirm('Approve proposal?', JSON.stringify(proposal))
     const result = await requestLocal(dir(), { kind: 'resolve_proposal', ticketId: ticketId!, proposalId: proposalId!, approve })
     ctx.ui.notify(JSON.stringify(readBoard(result)).slice(0, 8000), 'info')
+    const current = bound
+    if (current && current.ticketId === ticketId) supervise(current, ctx)
   }) })
   pi.registerCommand('ticket', { description: 'Propose a Ticket and ask for explicit approval', handler: async (args, ctx) => {
     if (!ctx.hasUI) { ctx.ui.notify('Ticket approval requires an interactive Pi UI', 'error'); return }
@@ -101,6 +182,17 @@ export default function superagent(pi: ExtensionAPI) {
     await run(ctx, async () => {
       const result = await requestLocal(dir(), { kind: 'submit', investigationId, eventId: randomUUID(), text, evidence: [] })
       ctx.ui.notify(`Ticket submitted: ${investigationId}; /tickets to see status (${result.status})`, 'info')
+      const tickets = await requestLocal(dir(), { kind: 'list_tickets' })
+      const ticket = Array.isArray(tickets.tickets) ? tickets.tickets.find(item =>
+        typeof item === 'object' && item !== null && 'investigationId' in item && item.investigationId === investigationId) : undefined
+      if (result.status === 'stored' && ticket && typeof ticket === 'object' && 'ticketId' in ticket && typeof ticket.ticketId === 'string') {
+        const ticketId = ticket.ticketId
+        const board = readBoard(await requestLocal(dir(), { kind: 'board', ticketId }))
+        if (!board.tasks.length) {
+          await requestLocal(dir(), { kind: 'board_action', action: { op: 'task', ticketId, title: text.slice(0, 500) } })
+          ctx.ui.notify(`Initial task created. /collaborate ${ticketId} to approve a local reviewer and start.`, 'info')
+        }
+      }
     })
   } })
   pi.registerCommand('tickets', { description: 'List local Tickets across Pi sessions in this state directory', handler: async (_args, ctx) => run(ctx, async () => {
@@ -151,9 +243,11 @@ export default function superagent(pi: ExtensionAPI) {
     if (!await ctx.ui.confirm('Assign task to agent?', `${taskId} on ${ticketId} → ${agentId}`)) return
     const result = await requestLocal(dir(), { kind: 'claim_agent', ticketId: ticketId!, taskId: taskId!, agentId: agentId! })
     ctx.ui.notify(JSON.stringify(readBoard(result)).slice(0, 8000), 'info')
+    const current = bound
+    if (current && current.ticketId === ticketId) supervise(current, ctx)
   }) })
   pi.registerCommand('run-agent', { description: 'Deprecated: use /collaborate then /next-agent', handler: async (_args, ctx) => {
-    ctx.ui.notify('Use /collaborate <ticket-id>, then /next-agent <ticket-id>. Unsupervised turns are disabled.', 'warning')
+    ctx.ui.notify('Use /collaborate <ticket-id> for supervised automatic turns. Unsupervised turns are disabled.', 'warning')
   } })
   pi.registerCommand('discuss', { description: 'Post an owner message: /discuss <ticket-id> <message>', handler: async (args, ctx) => run(ctx, async () => {
     const [ticketId, ...words] = args.trim().split(/\s+/)

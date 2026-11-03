@@ -59,6 +59,71 @@ describe('ticket-scoped collaboration', () => {
       await expect(publicEndpoint(host)).rejects.toThrow('non-public')
     await expect(publicEndpoint('1.1.1.1')).resolves.toBe('1.1.1.1')
   })
+  it('requires an active lease and local approval before preparing one task, and never claims past pending proposals or ambiguous turns', async () => {
+    const { runtime, ticket } = await make()
+    const taskId = runtime.collaboration.act(localActor(), { op: 'task', ticketId: ticket.id, title: 'Synthetic task' }).tasks[0]!.id
+    expect(() => runtime.presence.prepare(ticket.id, 'pi-auto')).toThrow('paused')
+    runtime.presence.resume(ticket.id, 'pi-auto', 1)
+    expect(() => runtime.presence.prepare(ticket.id, 'pi-auto')).toThrow('not approved')
+    runtime.collaboration.approve(ticket.id, { id: 'reviewer', kind: 'local', tickets: [] })
+    expect(runtime.presence.prepare(ticket.id, 'pi-auto').tasks[0]).toMatchObject({ id: taskId, state: 'claimed', claimedBy: 'reviewer' })
+    const second = runtime.collaboration.act(localActor(), { op: 'task', ticketId: ticket.id, title: 'Next task' }).tasks[1]!.id
+    expect(runtime.presence.prepare(ticket.id, 'pi-auto').tasks[1]).toMatchObject({ id: second, state: 'open' })
+    runtime.collaboration.act('reviewer', { op: 'propose_task', ticketId: ticket.id, title: 'Other', reason: 'Await owner' })
+    expect(runtime.presence.prepare(ticket.id, 'pi-auto').tasks[1]?.state).toBe('open')
+    await runtime.shutdown()
+  })
+
+  it('publishes bounded user-facing checkpoints before final result; cancellation cannot publish late updates', async () => {
+    const { runtime, ticket } = await make()
+    const collab = runtime.collaboration
+    collab.approve(ticket.id, { id: 'reviewer', kind: 'local', tickets: [] })
+    const taskId = collab.act(localActor(), { op: 'task', ticketId: ticket.id, title: 'Synthetic' }).tasks[0]!.id
+    collab.claim(ticket.id, taskId, 'reviewer')
+    let finish!: (reply: { message: string; done: boolean }) => void
+    let send!: (text: string) => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const turn = runAgent(runtime.store, collab, ticket.id, taskId, 'reviewer', async (_request, _signal, checkpoint) => {
+      send = checkpoint!
+      send('Checking only the synthetic Ticket summary')
+      entered()
+      return new Promise(resolve => { finish = resolve })
+    })
+    await started
+    expect(collab.board(ticket.id).progress.map(item => item.kind)).toEqual(['started', 'checkpoint'])
+    for (let i = 0; i < 8; i++) send(`Checkpoint ${i}`)
+    expect(collab.board(ticket.id).progress.filter(item => item.kind === 'checkpoint')).toHaveLength(6)
+    finish({ message: 'No diagnostic evidence', done: true })
+    await turn
+    expect(collab.board(ticket.id).progress.at(-1)?.kind).toBe('result')
+    await runtime.shutdown()
+  })
+
+  it('never writes checkpoints after cancellation or after the reply is committed', async () => {
+    const { runtime, ticket } = await make()
+    const collab = runtime.collaboration
+    collab.approve(ticket.id, { id: 'reviewer', kind: 'local', tickets: [] })
+    const taskId = collab.act(localActor(), { op: 'task', ticketId: ticket.id, title: 'Synthetic cancel' }).tasks[0]!.id
+    collab.claim(ticket.id, taskId, 'reviewer')
+    const controller = new AbortController()
+    let send!: (text: string) => void
+    let finish!: (reply: { message: string; done: boolean }) => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const turn = runAgent(runtime.store, collab, ticket.id, taskId, 'reviewer', async (_request, _signal, checkpoint) => {
+      send = checkpoint!; entered()
+      return new Promise(resolve => { finish = resolve })
+    }, controller.signal)
+    await started
+    controller.abort()
+    send('must not appear')
+    finish({ message: 'late', done: true })
+    await expect(turn).rejects.toThrow('cancelled')
+    expect(collab.board(ticket.id).progress.some(item => item.kind === 'checkpoint')).toBe(false)
+    await runtime.shutdown()
+  })
+
   it('requires an Engine-approved Ticket, per-Ticket agent approval, claim, and records one bounded turn durably', async () => {
     const { runtime, ticket } = await make()
     const collab = runtime.collaboration

@@ -59,6 +59,21 @@ export class PresenceManager {
   async drain(): Promise<void> {
     while (this.activeTurns.size) await new Promise(resolve => setTimeout(resolve, 10))
   }
+  /** Prepare one owner-approved local task without granting the agent new capabilities. */
+  prepare(ticketId: string, session: string): Board {
+    const state = this.current(ticketId)
+    if (!state || state.session !== session || !this.view(ticketId).active) throw new Error('Collaboration paused; resume explicitly')
+    const active = this.active.get(ticketId)
+    const board = this.collaboration.board(ticketId)
+    if (active?.running || state.remaining < 1 || board.proposals.some(item => item.state === 'pending')) return board
+    const approved = this.collaboration.registry().agents.find(agent => agent.id === 'reviewer' && agent.kind === 'local' && agent.tickets.includes(ticketId))
+    if (!approved) throw new Error('Local reviewer not approved for Ticket')
+    // Do not claim more work while an earlier turn is in progress or failed ambiguously.
+    if (board.tasks.some(task => task.state === 'claimed')) return board
+    const open = board.tasks.find(task => task.state === 'open')
+    if (open) return this.collaboration.claim(ticketId, open.id, approved.id)
+    return board
+  }
   async step(ticketId: string, session: string): Promise<Board> {
     const state = this.current(ticketId)
     const active = this.active.get(ticketId)

@@ -9,7 +9,7 @@ const Task = z.object({ id: ID, title: z.string().trim().min(1).max(500), state:
 const Message = z.object({ id: ID, taskId: ID.optional(), actor: ID, text: z.string().trim().min(1).max(4000), at: z.string() }).strict()
 const Proposal = z.object({ id: ID, kind: z.enum(['task', 'invite']), actor: ID, title: Task.shape.title.optional(),
   agentId: ID.optional(), reason: z.string().trim().min(1).max(2000), state: z.enum(['pending', 'approved', 'rejected']), at: z.string() }).strict()
-const Progress = z.object({ id: ID, actor: ID, taskId: ID.optional(), kind: z.enum(['started', 'result', 'proposal', 'approval', 'paused', 'failed']),
+const Progress = z.object({ id: ID, actor: ID, taskId: ID.optional(), kind: z.enum(['started', 'checkpoint', 'result', 'proposal', 'approval', 'paused', 'failed']),
   explanation: z.string().trim().min(1).max(2000), at: z.string() }).strict()
 export const Board = z.object({ ticketId: ID, tasks: z.array(Task).max(100), messages: z.array(Message).max(500),
   proposals: z.array(Proposal).max(100).default([]), progress: z.array(Progress).max(500).default([]) }).strict()
