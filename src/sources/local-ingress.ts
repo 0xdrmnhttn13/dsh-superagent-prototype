@@ -9,6 +9,8 @@ import { z } from 'zod'
 import { key, latestReport, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { localTrigger, LOCAL_SOURCE } from './local-trigger.ts'
 import { BoardAction, AgentConfig, type Board, type Registry } from '../standalone/collaboration.ts'
+import type { WorkspaceLanguage } from '../standalone/workspace.ts'
+import { CodingProfile, type CodingProfile as Profile } from '../standalone/coding-profile.ts'
 
 const ID = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
 const MAX_EVIDENCE = 64 * 1024
@@ -25,13 +27,28 @@ const Submit = z.object({
   evidence: z.array(EvidenceUpload).max(4).default([]),
 }).strict()
 const Show = z.object({ kind: z.literal('show'), investigationId: ID }).strict()
-const Request = z.discriminatedUnion('kind', [Submit, Show, z.object({ kind: z.literal('status') }).strict(),
+const Followup = z.object({ kind: z.literal('ticket_followup'), ticketId: ID, eventId: ID,
+  text: z.string().trim().min(1).max(16_384) }).strict()
+const Request = z.discriminatedUnion('kind', [Submit, Show, Followup, z.object({ kind: z.literal('status') }).strict(),
+  z.object({ kind: z.literal('list_tickets') }).strict(),
+  z.object({ kind: z.literal('inspect_ticket'), ticketId: ID }).strict(),
   z.object({ kind: z.literal('board'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('workspace_bind'), ticketId: ID, source: z.string().min(1).max(1024), language: z.enum(['go', 'rust', 'cpp']).default('go') }).strict(),
+  z.object({ kind: z.literal('workspace_grant'), ticketId: ID, paths: z.array(z.string()).min(1).max(12) }).strict(),
+  z.object({ kind: z.literal('workspace_revoke'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('workspace_approve_write'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('workspace_inspect'), ticketId: ID, path: z.string().min(1).max(300) }).strict(),
+  z.object({ kind: z.literal('workspace_list'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('workspace_diff'), ticketId: ID }).strict(),
+  z.object({ kind: z.literal('workspace_format'), ticketId: ID }).strict(),
   z.object({ kind: z.literal('board_action'), action: BoardAction }).strict(),
+  z.object({ kind: z.literal('code_task'), ticketId: ID, title: z.string().trim().min(1).max(493), head: z.string().regex(/^[a-f0-9]{40,64}$/),
+    paths: z.array(z.string()).min(1).max(12), profile: CodingProfile.default('default') }).strict(),
   z.object({ kind: z.literal('approve_agent'), ticketId: ID, agent: AgentConfig.omit({ tickets: true }), token: z.string().optional() }).strict(),
   z.object({ kind: z.literal('revoke_agent'), ticketId: ID, agentId: ID }).strict(),
-  z.object({ kind: z.literal('run_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
   z.object({ kind: z.literal('claim_agent'), ticketId: ID, taskId: ID, agentId: ID }).strict(),
+  z.object({ kind: z.literal('resolve_proposal'), ticketId: ID, proposalId: ID, approve: z.boolean() }).strict(),
+  z.object({ kind: z.literal('collaboration'), ticketId: ID, session: ID, op: z.enum(['resume', 'heartbeat', 'pause', 'prepare', 'step']) }).strict(),
 ])
 export type LocalRequest = z.input<typeof Request>
 
@@ -41,18 +58,39 @@ export interface IngressHost {
     config(kind: string): { acceptPrompts: boolean } | undefined
     receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
     threads?: { get(key: string): { subscriptions: string[] } | undefined }
-    tickets?: { get(id: string): Ticket | undefined }
+    tickets?: { get(id: string): Ticket | undefined; list?(): Ticket[] }
     triggers: { get(id: string): Trigger | undefined; latest?(thread: string): Trigger | undefined }
   }
   allowedActor(actor: string): boolean
   collaboration?: {
+    workspace?: {
+      bind(ticketId: string, source: string, language?: WorkspaceLanguage): { head: string; count: number; language: WorkspaceLanguage }
+      grant(ticketId: string, paths: string[]): { head: string; paths: string[]; mode: 'read' }
+      revoke(ticketId: string): void
+      approveWrite(ticketId: string): { paths: string[]; mode: 'write' }
+      inspectIntent(ticketId: string, path: string): { path: string; state: 'before' | 'after' | 'conflict'; before: string; after: string }
+      discover(ticketId: string): { head: string; paths: string[] }
+      list(ticketId: string): { head: string; paths: string[]; changed: string[]; mode: 'read' | 'write' | 'legacy' }
+      diff(ticketId: string): { head: string; files: { path: string; before: string; after: string }[] }
+      formatStatus(ticketId: string): { head: string; files: { path: string; formatted: boolean; error?: string }[] }
+    }
     board(ticketId: string): Board
+    codeTask?(ticketId: string, title: string, head: string, paths: string[], profile?: Profile): Board
     act(actorId: string, action: z.infer<typeof BoardAction>, token?: string): Board
     approve(ticketId: string, agent: z.infer<typeof AgentConfig>, token?: string): void
     revoke(ticketId: string, agentId: string): void
     registry(): Registry
-    run?(ticketId: string, taskId: string, agentId: string): Promise<Board>
     claim?(ticketId: string, taskId: string, agentId: string): Board
+    resolve?(ticketId: string, proposalId: string, approve: boolean, approveFiles?: (paths: string[]) => void): Board
+    presence?: {
+      view(ticketId: string): { active: boolean; remaining: number; paused: boolean }
+      requireIdle?(ticketId: string): void
+      resume(ticketId: string, session: string, maxTurns?: number): void
+      heartbeat(ticketId: string, session: string): void
+      pause(ticketId: string, session: string): void
+      step(ticketId: string, session: string): Promise<Board>
+      prepare?(ticketId: string, session: string): Board
+    }
   }
 }
 
@@ -134,20 +172,88 @@ export async function processLocalRequest(host: IngressHost, input: unknown): Pr
   const allowed = host.allowedActor(actor)
   if (request.kind === 'status') return { ok: true, actor, enabled, allowed }
   if (!enabled || !allowed) return { ok: false, error: !enabled ? 'local_intake_disabled' : 'local_actor_not_allowlisted', actor }
+  const owned = (ticket: Ticket): boolean => ticket.mandate.actor.source === LOCAL_SOURCE && ticket.mandate.actor.id === actor
+    && host.source.triggers.get(ticket.origin.triggerId)?.source === LOCAL_SOURCE
+    && host.source.triggers.get(ticket.origin.triggerId)?.actor.id === actor
+  if (request.kind === 'list_tickets') return { ok: true, tickets: (host.source.tickets?.list?.() ?? []).filter(owned)
+    .slice(0, 100).map(ticket => ({ ticketId: ticket.id, title: ticket.title, investigationId:
+      host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId, ended: ticket.ended ?? null,
+      latestReport: latestReport(ticket)?.state ?? null })) }
+  if (request.kind === 'inspect_ticket') {
+    const ticket = host.source.tickets?.get(request.ticketId)
+    if (!ticket || !owned(ticket)) return { ok: false, error: 'unknown_ticket' }
+    return { ok: true, ticketId: ticket.id, title: ticket.title, investigationId:
+      host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId, ended: ticket.ended ?? null,
+      latestReport: latestReport(ticket)?.state ?? null }
+  }
+  if (request.kind === 'workspace_bind') return { ok: true, workspace: host.collaboration?.workspace?.bind(request.ticketId, request.source, request.language) }
+  if (request.kind === 'workspace_grant') {
+    host.collaboration?.presence?.requireIdle?.(request.ticketId)
+    return { ok: true, workspace: host.collaboration?.workspace?.grant(request.ticketId, request.paths) }
+  }
+  if (request.kind === 'workspace_revoke') {
+    host.collaboration?.presence?.requireIdle?.(request.ticketId)
+    host.collaboration?.workspace?.revoke(request.ticketId)
+    return { ok: true }
+  }
+  if (request.kind === 'workspace_approve_write') {
+    host.collaboration?.presence?.requireIdle?.(request.ticketId)
+    return { ok: true, workspace: host.collaboration?.workspace?.approveWrite(request.ticketId) }
+  }
+  if (request.kind === 'workspace_inspect') return { ok: true, intent: host.collaboration?.workspace?.inspectIntent(request.ticketId, request.path) }
+  if (request.kind === 'workspace_list') return { ok: true, workspace: host.collaboration?.workspace?.list(request.ticketId) }
+  if (request.kind === 'workspace_diff') return { ok: true, diff: host.collaboration?.workspace?.diff(request.ticketId) }
+  if (request.kind === 'workspace_format') return { ok: true, format: host.collaboration?.workspace?.formatStatus(request.ticketId) }
   if (request.kind === 'board') return { ok: true, board: host.collaboration?.board(request.ticketId) }
-  if (request.kind === 'board_action') return { ok: true, board: host.collaboration?.act(actor, request.action) }
+  if (request.kind === 'board_action') {
+    if (request.action.op === 'task' && request.action.title.startsWith('CODE: ')) throw new Error('Use a separately confirmed coding task')
+    return { ok: true, board: host.collaboration?.act(actor, request.action) }
+  }
+  if (request.kind === 'code_task') {
+    if (!host.collaboration?.codeTask) throw new Error('Coding task unavailable')
+    return { ok: true, board: host.collaboration.codeTask(request.ticketId, request.title, request.head, request.paths, request.profile) }
+  }
   if (request.kind === 'approve_agent') {
     host.collaboration?.approve(request.ticketId, { ...request.agent, tickets: [] }, request.token)
     return { ok: true }
   }
   if (request.kind === 'revoke_agent') { host.collaboration?.revoke(request.ticketId, request.agentId); return { ok: true } }
+  if (request.kind === 'resolve_proposal') {
+    if (!host.collaboration?.resolve) return { ok: false, error: 'proposal_unavailable' }
+    return { ok: true, board: host.collaboration.resolve(request.ticketId, request.proposalId, request.approve,
+      paths => { if (!host.collaboration?.workspace) throw new Error('Workspace unavailable')
+        host.collaboration.presence?.requireIdle?.(request.ticketId)
+        host.collaboration.workspace.grant(request.ticketId, paths) }) }
+  }
+  if (request.kind === 'collaboration') {
+    const presence = host.collaboration?.presence
+    if (!presence) return { ok: false, error: 'collaboration_unavailable' }
+    if (request.op === 'resume') presence.resume(request.ticketId, request.session)
+    else if (request.op === 'heartbeat') presence.heartbeat(request.ticketId, request.session)
+    else if (request.op === 'pause') presence.pause(request.ticketId, request.session)
+    else if (request.op === 'prepare') return { ok: true, board: presence.prepare?.(request.ticketId, request.session), presence: presence.view(request.ticketId) }
+    else return { ok: true, board: await presence.step(request.ticketId, request.session), presence: presence.view(request.ticketId) }
+    return { ok: true, presence: presence.view(request.ticketId) }
+  }
   if (request.kind === 'claim_agent') {
     if (!host.collaboration?.claim) return { ok: false, error: 'agent_claim_unavailable' }
     return { ok: true, board: host.collaboration.claim(request.ticketId, request.taskId, request.agentId) }
   }
-  if (request.kind === 'run_agent') {
-    if (!host.collaboration?.run) return { ok: false, error: 'agent_execution_unavailable' }
-    return { ok: true, board: await host.collaboration.run(request.ticketId, request.taskId, request.agentId) }
+  if (request.kind === 'ticket_followup') {
+    const ticket = host.source.tickets?.get(request.ticketId)
+    if (!ticket || !owned(ticket) || ticket.ended) return { ok: false, error: 'unknown_ticket' }
+    const investigationId = host.source.triggers.get(ticket.origin.triggerId)?.meta.investigationId
+    if (typeof investigationId !== 'string' || !ID.safeParse(investigationId).success) return { ok: false, error: 'unknown_investigation' }
+    const eventId = key(LOCAL_SOURCE, request.eventId)
+    const previous = host.source.triggers.get(eventId)
+    if (previous) return previous.source === LOCAL_SOURCE && previous.actor.id === actor
+      && previous.meta.investigationId === investigationId && previous.text === request.text
+      ? { ok: true, status: 'duplicate', ticketId: ticket.id, investigationId, triggerId: eventId }
+      : { ok: false, error: 'event_id_conflict' }
+    const trigger = localTrigger({ id: request.eventId, investigationId, actor,
+      at: new Date().toISOString(), text: request.text, evidence: [] })
+    const status = await host.source.receive(trigger)
+    return { ok: status === 'stored', status, ticketId: ticket.id, investigationId, triggerId: trigger.id }
   }
   if (request.kind === 'show') {
     const thread = host.source.threads?.get(`local:${request.investigationId}`)
@@ -206,7 +312,7 @@ export async function listenLocalIngress(host: IngressHost): Promise<() => Promi
     const chunks: Buffer[] = []
     let bytes = 0
     let tooLarge = false
-    socket.setTimeout(10_000, () => { socket.destroy() })
+    socket.setTimeout(60_000, () => { socket.destroy() })
     socket.on('data', (chunk: Buffer) => {
       bytes += chunk.length
       if (bytes > MAX_WIRE) { tooLarge = true; socket.destroy(); return }

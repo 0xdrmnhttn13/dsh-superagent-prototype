@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsdown --config tsdown.standalone.config.ts",
     "typecheck": "tsc -p tsconfig.standalone.json --noEmit",
-    "test": "vitest run tests/core-engine.spec.ts tests/store.spec.ts tests/local-ingress.spec.ts tests/local-trigger.spec.ts tests/local-source.spec.ts tests/local-lifecycle.spec.ts tests/standalone.spec.ts tests/stage.spec.ts tests/collaboration.spec.ts",
+    "test": "vitest run tests/core-engine.spec.ts tests/store.spec.ts tests/local-ingress.spec.ts tests/local-trigger.spec.ts tests/local-source.spec.ts tests/local-lifecycle.spec.ts tests/standalone.spec.ts tests/stage.spec.ts tests/collaboration.spec.ts tests/workspace.spec.ts",
     "audit:deps": "node scripts/audit-deps.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm audit:deps"
   },
@@ -26,6 +26,7 @@
   "packageManager": "pnpm@11.7.0",
   "dependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "typebox": "1.3.27",
     "undici": "8.10.2",
     "zod": "4.4.3"

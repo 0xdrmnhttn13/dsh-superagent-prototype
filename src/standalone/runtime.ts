@@ -8,7 +8,10 @@ import { localKind } from '../sources/local.ts'
 import { localActor, listenLocalIngress, type IngressHost } from '../sources/local-ingress.ts'
 import { PiExecutor, type SessionFactory } from './pi.ts'
 import { Collaboration } from './collaboration.ts'
-import { runAgent, localAgent, externalAgent, type AgentRunner } from './agents.ts'
+import { runAgent, localAgent, workspaceAgent, externalAgent, type AgentRunner } from './agents.ts'
+import { Workspace } from './workspace.ts'
+import { PresenceManager } from './presence.ts'
+import { CodingProfile, profileInstructions, type CodingProfile as Profile } from './coding-profile.ts'
 
 export interface RuntimeOptions { stateDir: string; sessionFactory?: SessionFactory; agentRunner?: AgentRunner; allowActor?: boolean; evidence?: boolean }
 
@@ -18,6 +21,8 @@ export class LocalRuntime {
   readonly engine: Engine
   readonly executor: PiExecutor
   readonly collaboration: Collaboration
+  readonly workspace: Workspace
+  readonly presence: PresenceManager
   private stopIngress?: () => Promise<void>
   private timer?: ReturnType<typeof setInterval>
   readonly host: IngressHost
@@ -44,6 +49,10 @@ export class LocalRuntime {
     this.sources.register(localKind)
     this.executor = new PiExecutor(this.store, options.stateDir, options.sessionFactory)
     this.collaboration = new Collaboration(this.store)
+    this.workspace = new Workspace(this.store, this.collaboration)
+    this.presence = new PresenceManager(this.store, this.collaboration,
+      (ticketId, taskId, agentId, signal) => this.runAgent(ticketId, taskId, agentId, signal))
+    this.collaboration.requireIdle = ticketId => this.presence.requireIdle(ticketId)
     this.engine = new Engine({ repo: this.store, scope: this.sources, policy: () => settingsPolicy(this.store.settings(), this.sources),
       assessor: { request: (candidate: Candidate) => { this.store.afterCommit(() => this.admit(candidate)) } },
       executor: { start: (ticket, assignment) => this.store.afterCommit(() => this.executor.start(ticket, assignment)),
@@ -58,24 +67,51 @@ export class LocalRuntime {
         approve: (ticketId: string, agent: Parameters<Collaboration['approve']>[1], token?: string) => this.collaboration.approve(ticketId, agent, token),
         revoke: (ticketId: string, agentId: string) => this.collaboration.revoke(ticketId, agentId),
         registry: () => this.collaboration.registry(),
-        run: (ticketId: string, taskId: string, agentId: string) => this.runAgent(ticketId, taskId, agentId),
         claim: (ticketId: string, taskId: string, agentId: string) => this.collaboration.claim(ticketId, taskId, agentId),
+        resolve: (ticketId: string, proposalId: string, approve: boolean, approveFiles?: (paths: string[]) => void) =>
+          this.collaboration.resolve(ticketId, proposalId, approve, approveFiles),
+        presence: this.presence,
+        workspace: this.workspace,
+        codeTask: (ticketId: string, title: string, head: string, paths: string[], profile: Profile = 'default') => {
+          this.presence.requireIdle(ticketId)
+          return this.store.atomic(() => {
+            this.workspace.assertCodingScope(ticketId, head, paths)
+            // Validate the selected specialist before persisting any task or agent approval.
+            profileInstructions(CodingProfile.parse(profile))
+            this.collaboration.approve(ticketId, { id: 'coder', kind: 'local', tickets: [] })
+            const board = this.collaboration.codeTask(ticketId, title)
+            const task = board.tasks.at(-1)!
+            this.store.set(`collaboration:code-task:${ticketId}:${task.id}`, { head, paths, profile })
+            return board
+          })
+        },
       },
       source: { config: kind => kind === 'local' ? this.sources.instance<{ acceptPrompts: boolean }>('local')?.config : undefined,
         receive: (trigger: Trigger) => { const result = this.engine.receive(trigger); this.engine.evaluateDue(); return result },
-        threads: { get: key => this.store.threads.get(key) }, tickets: { get: id => this.store.tickets.get(id) },
+        threads: { get: key => this.store.threads.get(key) }, tickets: { get: id => this.store.tickets.get(id), list: () => this.store.tickets.list() },
         triggers: { get: id => this.store.triggers.get(id) } },
       allowedActor: actor => actor === localActor() && this.store.settings().policy.sources.local?.allowed.some(item => item.id === actor) === true }
   }
-  private async runAgent(ticketId: string, taskId: string, agentId: string) {
+  private async runAgent(ticketId: string, taskId: string, agentId: string, signal?: AbortSignal) {
     const agent = this.collaboration.approved(ticketId, agentId)
-    if (agent.kind === 'local') return runAgent(this.store, this.collaboration, ticketId, taskId, agentId, this.options.agentRunner ?? localAgent)
+    if (agentId === 'coder') {
+      const scope = this.store.get<{ head: string; paths: string[]; profile?: Profile }>(`collaboration:code-task:${ticketId}:${taskId}`)
+      if (!scope || !this.workspace.has(ticketId) || this.workspace.list(ticketId).mode !== 'write'
+        || this.workspace.list(ticketId).head !== scope.head
+        || JSON.stringify(this.workspace.list(ticketId).paths) !== JSON.stringify(scope.paths))
+        throw new Error('Coder task or write scope no longer authorized')
+    }
+    if (agent.kind === 'local') return runAgent(this.store, this.collaboration, ticketId, taskId, agentId,
+      this.options.agentRunner ?? (this.workspace.isBound(ticketId) && (agentId === 'reviewer' || agentId === 'coder')
+        ? workspaceAgent(this.workspace, (id, task, actor, activeSignal) => this.presence.authorizeTurn(id, task, actor, activeSignal),
+          agentId === 'coder' ? profileInstructions(CodingProfile.parse(this.store.get<{ profile?: Profile }>(`collaboration:code-task:${ticketId}:${taskId}`)?.profile ?? 'default')) : undefined)
+        : localAgent), signal)
     const token = process.env[agent.tokenEnv!]
     if (!token || token.length < 32) throw new Error('External agent token environment variable unavailable')
     // The token is never stored in plaintext or sent to the Pi model.
     this.collaboration.authorized(ticketId, agentId, token)
     return runAgent(this.store, this.collaboration, ticketId, taskId, agentId,
-      externalAgent(agent.endpoint!, token))
+      externalAgent(agent.endpoint!, token), signal)
   }
   private admit(candidate: Candidate): void {
     const trigger = candidate.triggers.find(item => item.id === candidate.thread.evaluating?.primary) ?? candidate.triggers[0]
@@ -100,6 +136,8 @@ export class LocalRuntime {
   async shutdown(): Promise<void> {
     if (this.timer) clearInterval(this.timer)
     if (this.stopIngress) { const stop = this.stopIngress; this.stopIngress = undefined; await stop() }
+    this.presence.pauseAll()
+    await this.presence.drain()
     await this.executor.shutdown()
     this.store.close()
   }
